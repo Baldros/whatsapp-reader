@@ -9,6 +9,12 @@ description = "Local CLI for importing and querying WhatsApp TXT exports in SQLi
 requires-python = ">=3.11"
 readme = "README.md"
 
+[project.optional-dependencies]
+agent = [
+    "langchain>=1.0,<2.0",
+    "langchain-openai>=1.0,<2.0",
+]
+
 [project.scripts]
 whatsapp-reader = "whatsapp_reader.cli:main"
 

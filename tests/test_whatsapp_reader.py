@@ -1,12 +1,25 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from whatsapp_reader.cli import format_messages_as_json
-from whatsapp_reader.db import connect, import_messages, query_messages
+from whatsapp_reader.config import load_env_file, resolve_db_path, resolve_timezone
+from whatsapp_reader.conversation_tools import ConversationToolbox
+from whatsapp_reader.db import (
+    connect,
+    count_messages,
+    get_message_window,
+    import_messages,
+    list_chats,
+    list_senders,
+    query_messages,
+    search_messages,
+)
 from whatsapp_reader.importer import parse_export
 
 
@@ -105,6 +118,62 @@ class WhatsAppReaderTest(unittest.TestCase):
                 }
             ],
         )
+
+    def test_structured_database_tools(self) -> None:
+        messages = parse_export(self.export_path)
+        with connect(self.db_path) as connection:
+            import_messages(connection, messages, "Family", self.export_path)
+            stored = query_messages(connection)
+            chats = list_chats(connection)
+            senders = list_senders(connection, chat_name="Family")
+            search = search_messages(connection, text_query="Same minute", sender="Alice")
+            counts = count_messages(connection, group_by="sender", chat_name="Family")
+            window = get_message_window(
+                connection,
+                message_id=stored[3].id,
+                before=1,
+                after=1,
+            )
+
+        self.assertEqual(chats[0]["chat_name"], "Family")
+        self.assertEqual(chats[0]["message_count"], 6)
+        self.assertEqual(senders[0]["sender"], "Alice")
+        self.assertEqual(senders[0]["message_count"], 3)
+        self.assertEqual([message.text for message in search], ["Same minute one", "Same minute two"])
+        self.assertEqual(counts[0]["bucket"], "Alice")
+        self.assertEqual([message.text for message in window], [
+            "Alice pinned a message",
+            "Same minute one",
+            "Same minute two",
+        ])
+
+    def test_conversation_toolbox_outputs_json(self) -> None:
+        messages = parse_export(self.export_path)
+        with connect(self.db_path) as connection:
+            import_messages(connection, messages, "Family", self.export_path)
+
+        toolbox = ConversationToolbox(self.db_path, default_chat="Family")
+        search_payload = json.loads(toolbox.search_messages("List", limit=5))
+        count_payload = json.loads(toolbox.count_messages(group_by="date"))
+
+        self.assertEqual(search_payload["count"], 1)
+        self.assertEqual(search_payload["messages"][0]["text"], "List:\n- item one\n- item two")
+        self.assertEqual(count_payload["rows"][0]["bucket"], "2024-01-02")
+        self.assertEqual(count_payload["rows"][0]["message_count"], 5)
+
+    def test_env_file_loading_does_not_override_existing_values(self) -> None:
+        env_path = self.root / ".env"
+        env_path.write_text(
+            "WHATSAPP_READER_DB=from-file.sqlite3\n"
+            "WHATSAPP_READER_TIMEZONE=\"America/Sao_Paulo\"\n",
+            encoding="utf-8",
+        )
+
+        with patch.dict(os.environ, {"WHATSAPP_READER_DB": "from-env.sqlite3"}, clear=True):
+            load_env_file(env_path)
+
+            self.assertEqual(resolve_db_path(), "from-env.sqlite3")
+            self.assertEqual(resolve_timezone(), "America/Sao_Paulo")
 
 
 if __name__ == "__main__":

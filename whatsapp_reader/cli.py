@@ -1,17 +1,21 @@
 from __future__ import annotations
 
 import argparse
-from datetime import datetime, timedelta
 import json
 import sys
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
 from .db import StoredMessage, connect, import_messages, query_messages
+from .config import (
+    DEFAULT_DB,
+    DEFAULT_ENV_FILE,
+    load_env_file,
+    resolve_agent_model,
+    resolve_db_path,
+    resolve_timezone,
+)
 from .importer import DEFAULT_TIMEZONE, ParseError, parse_export
-
-
-DEFAULT_DB = "whatsapp.sqlite3"
+from .time_utils import build_time_range
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -25,7 +29,9 @@ def main(argv: list[str] | None = None) -> int:
             return _run_query(args)
         if args.command == "export-context":
             return _run_export_context(args)
-    except (OSError, ParseError, ValueError) as exc:
+        if args.command == "ask":
+            return _run_ask(args)
+    except (OSError, ParseError, RuntimeError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
@@ -60,14 +66,25 @@ def build_parser() -> argparse.ArgumentParser:
         help="Output format.",
     )
 
+    ask_parser = subparsers.add_parser("ask", help="Ask an agent about imported conversations.")
+    _add_common_options(ask_parser)
+    ask_parser.add_argument("question", nargs="+", help="Question to answer using conversation tools.")
+    ask_parser.add_argument("--chat", help="Default chat or group scope for agent tools.")
+    ask_parser.add_argument("--model", help="LangChain model id. Default: WHATSAPP_READER_MODEL.")
+
     return parser
 
 
 def _add_common_options(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--db", default=DEFAULT_DB, help=f"SQLite database path. Default: {DEFAULT_DB}")
+    parser.add_argument("--db", help=f"SQLite database path. Default: {DEFAULT_DB}")
+    parser.add_argument(
+        "--env-file",
+        default=DEFAULT_ENV_FILE,
+        help=f"Local env file to load. Default: {DEFAULT_ENV_FILE}",
+    )
     parser.add_argument(
         "--timezone",
-        default=DEFAULT_TIMEZONE,
+        default=None,
         help=f"Timezone used for TXT and query dates. Default: {DEFAULT_TIMEZONE}",
     )
 
@@ -89,13 +106,16 @@ def _add_filter_options(parser: argparse.ArgumentParser) -> None:
 
 
 def _run_import(args: argparse.Namespace) -> int:
-    messages = parse_export(args.file, args.timezone)
-    with connect(args.db) as connection:
+    load_env_file(args.env_file)
+    db_path = resolve_db_path(args.db)
+    timezone = resolve_timezone(args.timezone)
+    messages = parse_export(args.file, timezone)
+    with connect(db_path) as connection:
         result = import_messages(connection, messages, args.chat, args.file)
 
     print(
         f"parsed={result.parsed} inserted={result.inserted} skipped={result.skipped} "
-        f"db={args.db}"
+        f"db={db_path}"
     )
     return 0
 
@@ -115,9 +135,27 @@ def _run_export_context(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_ask(args: argparse.Namespace) -> int:
+    load_env_file(args.env_file)
+    from .agent import ask_conversation_agent
+
+    answer = ask_conversation_agent(
+        " ".join(args.question),
+        db_path=resolve_db_path(args.db),
+        timezone=resolve_timezone(args.timezone),
+        model=resolve_agent_model(args.model),
+        default_chat=args.chat,
+    )
+    print(answer)
+    return 0
+
+
 def _load_filtered_messages(args: argparse.Namespace) -> list[StoredMessage]:
-    from_timestamp, to_timestamp = _build_time_range(args.date, args.from_, args.to, args.timezone)
-    with connect(args.db) as connection:
+    load_env_file(args.env_file)
+    db_path = resolve_db_path(args.db)
+    timezone = resolve_timezone(args.timezone)
+    from_timestamp, to_timestamp = build_time_range(args.date, args.from_, args.to, timezone)
+    with connect(db_path) as connection:
         return query_messages(
             connection,
             chat_name=args.chat,
@@ -126,37 +164,6 @@ def _load_filtered_messages(args: argparse.Namespace) -> list[StoredMessage]:
             to_timestamp=to_timestamp,
             limit=getattr(args, "limit", None),
         )
-
-
-def _build_time_range(
-    date_value: str | None,
-    from_value: str | None,
-    to_value: str | None,
-    timezone_name: str,
-) -> tuple[datetime | None, datetime | None]:
-    if date_value and (from_value or to_value):
-        raise ValueError("use either --date or --from/--to, not both")
-
-    timezone = ZoneInfo(timezone_name)
-    if date_value:
-        start = datetime.strptime(date_value, "%Y-%m-%d").replace(tzinfo=timezone)
-        return start, start + timedelta(days=1) - timedelta(seconds=1)
-
-    start = _parse_cli_datetime(from_value, timezone) if from_value else None
-    end = _parse_cli_datetime(to_value, timezone) if to_value else None
-    if start and end and start > end:
-        raise ValueError("--from must be before or equal to --to")
-    return start, end
-
-
-def _parse_cli_datetime(value: str, timezone: ZoneInfo) -> datetime:
-    normalized = value.replace("T", " ")
-    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S"):
-        try:
-            return datetime.strptime(normalized, fmt).replace(tzinfo=timezone)
-        except ValueError:
-            pass
-    raise ValueError(f"invalid datetime {value!r}; expected YYYY-MM-DD HH:MM")
 
 
 def format_messages_as_txt(messages: list[StoredMessage]) -> str:
