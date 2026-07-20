@@ -79,15 +79,20 @@ def build_parser() -> argparse.ArgumentParser:
 
     chat_parser = subparsers.add_parser("chat", help="Open an interactive terminal chat.")
     _add_common_options(chat_parser)
-    chat_parser.add_argument("message", nargs="*", help="Optional first message to send.")
-    chat_parser.add_argument("--chat", help="Default chat or group scope for agent tools.")
-    chat_parser.add_argument("--model", help="LangChain model id. Default: WHATSAPP_READER_MODEL.")
-    chat_parser.add_argument("--session", help="Conversation memory session id.")
-    chat_parser.add_argument("--memory-db", help="SQLite checkpoint database for chat memory.")
-    chat_parser.add_argument("--history-file", help="Prompt history file.")
-    chat_parser.add_argument("--no-stream", action="store_true", help="Disable streamed answers.")
+    add_chat_options(chat_parser)
 
     return parser
+
+
+def add_chat_options(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("message", nargs="*", help="Optional first message to send.")
+    parser.add_argument("--chat", help="Default chat or group scope for agent tools.")
+    parser.add_argument("--model", help="LangChain model id. Default: WHATSAPP_READER_MODEL.")
+    parser.add_argument("--session", help="Conversation memory session id.")
+    parser.add_argument("--memory-db", help="SQLite checkpoint database for chat memory.")
+    parser.add_argument("--history-file", help="Prompt history file.")
+    parser.add_argument("--no-stream", action="store_true", help="Disable streamed answers.")
+    parser.add_argument("--no-onboarding", action="store_true", help="Skip guided setup checks.")
 
 
 def _add_common_options(parser: argparse.ArgumentParser) -> None:
@@ -178,6 +183,8 @@ def _run_chat(args: argparse.Namespace) -> int:
         memory_db=resolve_chat_memory_db(args.memory_db),
         history_file=resolve_chat_history_file(args.history_file),
         stream=not args.no_stream,
+        onboarding=not args.no_onboarding,
+        env_file=args.env_file,
     )
     run_terminal_chat(
         config=config,

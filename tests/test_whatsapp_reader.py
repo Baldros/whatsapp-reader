@@ -31,7 +31,11 @@ from whatsapp_reader.importer import parse_export
 from whatsapp_reader.terminal_chat import (
     _content_to_text,
     _normalize_stream_event,
+    _select_chat_from_choice,
+    _status_toolbar,
     _summarize_tool_payload,
+    _upsert_env_value,
+    TerminalChatConfig,
 )
 
 
@@ -211,6 +215,28 @@ class WhatsAppReaderTest(unittest.TestCase):
         self.assertEqual((mode, payload), ("messages", "payload"))
         self.assertEqual(summary, "2 mensagens")
         self.assertEqual(text, "hello world")
+
+    def test_terminal_chat_onboarding_helpers(self) -> None:
+        chats = [{"chat_name": "A&B"}, {"chat_name": "Other"}]
+        config = TerminalChatConfig(
+            db_path=str(self.db_path),
+            timezone="America/Sao_Paulo",
+            model="openai:gpt-5.6-terra",
+            chat_name="A&B",
+            session_id="dev<1>",
+        )
+        env_path = self.root / ".env"
+        env_path.write_text("WHATSAPP_READER_SESSION=old\n", encoding="utf-8")
+
+        _upsert_env_value(str(env_path), "OPENAI_API_KEY", "sk-test")
+        _upsert_env_value(str(env_path), "WHATSAPP_READER_SESSION", "new")
+
+        self.assertEqual(_select_chat_from_choice(chats, ""), None)
+        self.assertEqual(_select_chat_from_choice(chats, "1"), "A&B")
+        self.assertIn("OPENAI_API_KEY=sk-test", env_path.read_text(encoding="utf-8"))
+        self.assertIn("WHATSAPP_READER_SESSION=new", env_path.read_text(encoding="utf-8"))
+        self.assertIn("A&amp;B", _status_toolbar(config))
+        self.assertIn("dev&lt;1&gt;", _status_toolbar(config))
 
 
 if __name__ == "__main__":

@@ -53,12 +53,16 @@ Ferramentas disponiveis para o agent:
 Para conversar com o agent em um terminal com streaming e memoria por sessao:
 
 ```bash
-.venv/bin/python -m whatsapp_reader chat --chat "deepmesh dev group"
+.venv/bin/whatsapp-chat
 ```
 
-Tambem da para enviar a primeira mensagem direto:
+O frontend valida se ha mensagens importadas, permite escolher o chat quando existir mais de um, pede `OPENAI_API_KEY` se ela nao estiver configurada e depois abre a conversa no terminal.
+
+Tambem da para fixar um chat ou enviar a primeira mensagem direto:
 
 ```bash
+.venv/bin/whatsapp-chat --chat "deepmesh dev group"
+.venv/bin/whatsapp-chat --chat "deepmesh dev group" "Resume o que aconteceu ontem"
 .venv/bin/python -m whatsapp_reader chat --chat "deepmesh dev group" "Resume o que aconteceu ontem"
 ```
 
@@ -68,6 +72,8 @@ Comandos dentro do chat:
 
 - `/help`: lista comandos.
 - `/session`: mostra sessao, streaming e tamanho aproximado da memoria.
+- `/config`: mostra modelo, banco, chat e arquivos locais.
+- `/chats`: lista chats importados no banco.
 - `/new [nome]`: troca para outra memoria de conversa.
 - `/stream on|off`: liga ou desliga streaming.
 - `/tools`: mostra ferramentas estruturadas.

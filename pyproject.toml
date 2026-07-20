@@ -24,6 +24,7 @@ chat = [
 
 [project.scripts]
 whatsapp-reader = "whatsapp_reader.cli:main"
+whatsapp-chat = "whatsapp_reader.chat_entry:main"
 
 [tool.setuptools]
 packages = ["whatsapp_reader"]
