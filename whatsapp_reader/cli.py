@@ -11,6 +11,9 @@ from .config import (
     DEFAULT_ENV_FILE,
     load_env_file,
     resolve_agent_model,
+    resolve_chat_history_file,
+    resolve_chat_memory_db,
+    resolve_chat_session,
     resolve_db_path,
     resolve_timezone,
 )
@@ -31,6 +34,8 @@ def main(argv: list[str] | None = None) -> int:
             return _run_export_context(args)
         if args.command == "ask":
             return _run_ask(args)
+        if args.command == "chat":
+            return _run_chat(args)
     except (OSError, ParseError, RuntimeError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -71,6 +76,16 @@ def build_parser() -> argparse.ArgumentParser:
     ask_parser.add_argument("question", nargs="+", help="Question to answer using conversation tools.")
     ask_parser.add_argument("--chat", help="Default chat or group scope for agent tools.")
     ask_parser.add_argument("--model", help="LangChain model id. Default: WHATSAPP_READER_MODEL.")
+
+    chat_parser = subparsers.add_parser("chat", help="Open an interactive terminal chat.")
+    _add_common_options(chat_parser)
+    chat_parser.add_argument("message", nargs="*", help="Optional first message to send.")
+    chat_parser.add_argument("--chat", help="Default chat or group scope for agent tools.")
+    chat_parser.add_argument("--model", help="LangChain model id. Default: WHATSAPP_READER_MODEL.")
+    chat_parser.add_argument("--session", help="Conversation memory session id.")
+    chat_parser.add_argument("--memory-db", help="SQLite checkpoint database for chat memory.")
+    chat_parser.add_argument("--history-file", help="Prompt history file.")
+    chat_parser.add_argument("--no-stream", action="store_true", help="Disable streamed answers.")
 
     return parser
 
@@ -147,6 +162,27 @@ def _run_ask(args: argparse.Namespace) -> int:
         default_chat=args.chat,
     )
     print(answer)
+    return 0
+
+
+def _run_chat(args: argparse.Namespace) -> int:
+    load_env_file(args.env_file)
+    from .terminal_chat import TerminalChatConfig, run_terminal_chat
+
+    config = TerminalChatConfig(
+        db_path=resolve_db_path(args.db),
+        timezone=resolve_timezone(args.timezone),
+        model=resolve_agent_model(args.model),
+        chat_name=args.chat,
+        session_id=resolve_chat_session(args.session),
+        memory_db=resolve_chat_memory_db(args.memory_db),
+        history_file=resolve_chat_history_file(args.history_file),
+        stream=not args.no_stream,
+    )
+    run_terminal_chat(
+        config=config,
+        initial_message=" ".join(args.message) if args.message else None,
+    )
     return 0
 
 

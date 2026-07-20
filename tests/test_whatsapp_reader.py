@@ -8,7 +8,14 @@ from pathlib import Path
 from unittest.mock import patch
 
 from whatsapp_reader.cli import format_messages_as_json
-from whatsapp_reader.config import load_env_file, resolve_db_path, resolve_timezone
+from whatsapp_reader.config import (
+    load_env_file,
+    resolve_chat_history_file,
+    resolve_chat_memory_db,
+    resolve_chat_session,
+    resolve_db_path,
+    resolve_timezone,
+)
 from whatsapp_reader.conversation_tools import ConversationToolbox
 from whatsapp_reader.db import (
     connect,
@@ -21,6 +28,11 @@ from whatsapp_reader.db import (
     search_messages,
 )
 from whatsapp_reader.importer import parse_export
+from whatsapp_reader.terminal_chat import (
+    _content_to_text,
+    _normalize_stream_event,
+    _summarize_tool_payload,
+)
 
 
 SAMPLE_EXPORT = """1/2/24, 08:00 - Alice: First message
@@ -174,6 +186,31 @@ class WhatsAppReaderTest(unittest.TestCase):
 
             self.assertEqual(resolve_db_path(), "from-env.sqlite3")
             self.assertEqual(resolve_timezone(), "America/Sao_Paulo")
+
+    def test_chat_env_resolution(self) -> None:
+        env_path = self.root / ".env"
+        env_path.write_text(
+            "WHATSAPP_READER_SESSION=deepmesh\n"
+            "WHATSAPP_READER_MEMORY_DB=.memory.sqlite3\n"
+            "WHATSAPP_READER_HISTORY_FILE=.history\n",
+            encoding="utf-8",
+        )
+
+        with patch.dict(os.environ, {}, clear=True):
+            load_env_file(env_path)
+
+            self.assertEqual(resolve_chat_session(), "deepmesh")
+            self.assertEqual(resolve_chat_memory_db(), ".memory.sqlite3")
+            self.assertEqual(resolve_chat_history_file(), ".history")
+
+    def test_terminal_chat_stream_helpers(self) -> None:
+        mode, payload = _normalize_stream_event(("messages", "payload"))
+        summary = _summarize_tool_payload(json.dumps({"count": 2, "messages": []}))
+        text = _content_to_text([{"text": "hello"}, {"content": " world"}])
+
+        self.assertEqual((mode, payload), ("messages", "payload"))
+        self.assertEqual(summary, "2 mensagens")
+        self.assertEqual(text, "hello world")
 
 
 if __name__ == "__main__":

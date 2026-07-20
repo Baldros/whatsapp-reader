@@ -40,6 +40,7 @@ def create_conversation_agent(
     timezone: str,
     model: str,
     default_chat: str | None = None,
+    checkpointer: Any | None = None,
 ) -> Any:
     try:
         from langchain.agents import create_agent
@@ -63,6 +64,7 @@ def create_conversation_agent(
         model=model,
         tools=build_langchain_tools(toolbox),
         system_prompt=_build_system_prompt(timezone=timezone, default_chat=default_chat),
+        checkpointer=checkpointer,
     )
 
 

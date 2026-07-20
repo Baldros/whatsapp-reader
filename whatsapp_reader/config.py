@@ -9,6 +9,9 @@ from .importer import DEFAULT_TIMEZONE
 DEFAULT_DB = "whatsapp.sqlite3"
 DEFAULT_ENV_FILE = ".env"
 DEFAULT_AGENT_MODEL = "openai:gpt-5.6-terra"
+DEFAULT_CHAT_HISTORY_FILE = ".whatsapp-reader-history"
+DEFAULT_CHAT_MEMORY_DB = ".whatsapp-reader-memory.sqlite3"
+DEFAULT_CHAT_SESSION = "default"
 
 
 def load_env_file(path: str | Path | None = DEFAULT_ENV_FILE) -> None:
@@ -49,6 +52,24 @@ def resolve_agent_model(cli_value: str | None = None) -> str:
     if cli_value:
         return cli_value
     return os.environ.get("WHATSAPP_READER_MODEL", DEFAULT_AGENT_MODEL)
+
+
+def resolve_chat_history_file(cli_value: str | Path | None = None) -> str:
+    if cli_value:
+        return str(cli_value)
+    return os.environ.get("WHATSAPP_READER_HISTORY_FILE", DEFAULT_CHAT_HISTORY_FILE)
+
+
+def resolve_chat_memory_db(cli_value: str | Path | None = None) -> str:
+    if cli_value:
+        return str(cli_value)
+    return os.environ.get("WHATSAPP_READER_MEMORY_DB", DEFAULT_CHAT_MEMORY_DB)
+
+
+def resolve_chat_session(cli_value: str | None = None) -> str:
+    if cli_value:
+        return cli_value
+    return os.environ.get("WHATSAPP_READER_SESSION", DEFAULT_CHAT_SESSION)
 
 
 def _strip_env_value(value: str) -> str:
