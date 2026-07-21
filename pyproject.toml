@@ -14,10 +14,15 @@ agent = [
     "langchain>=1.0,<2.0",
     "langchain-openai>=1.0,<2.0",
 ]
+mcp = [
+    "mcp>=1.27,<2",
+]
 chat = [
     "langchain>=1.0,<2.0",
+    "langchain-mcp-adapters>=0.3,<0.4",
     "langchain-openai>=1.0,<2.0",
     "langgraph-checkpoint-sqlite>=3.0,<4.0",
+    "mcp>=1.27,<2",
     "prompt_toolkit>=3.0,<4.0",
     "rich>=14.0,<15.0",
 ]
@@ -25,6 +30,7 @@ chat = [
 [project.scripts]
 whatsapp-reader = "whatsapp_reader.cli:main"
 whatsapp-chat = "whatsapp_reader.chat_entry:main"
+whatsapp-mcp = "whatsapp_reader.mcp_server:main"
 
 [tool.setuptools]
 packages = ["whatsapp_reader"]

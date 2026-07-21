@@ -37,6 +37,10 @@ WHATSAPP_READER_TIMEZONE=America/Sao_Paulo
 WHATSAPP_READER_SESSION=default
 WHATSAPP_READER_MEMORY_DB=.whatsapp-reader-memory.sqlite3
 WHATSAPP_READER_HISTORY_FILE=.whatsapp-reader-history
+WHATSAPP_READER_TOOLS_BACKEND=mcp
+WHATSAPP_READER_MCP_URL=
+WHATSAPP_READER_MCP_HOST=127.0.0.1
+WHATSAPP_READER_MCP_PORT=0
 ```
 
 Ferramentas disponiveis para o agent:
@@ -48,6 +52,51 @@ Ferramentas disponiveis para o agent:
 - `count_messages`: agrega por chat, pessoa, data, hora ou tipo.
 - `get_context_around`: recupera mensagens vizinhas pelo `message_id`.
 
+## MCP
+
+As mesmas ferramentas tambem podem rodar como um servidor MCP local. Isso permite conectar o banco de conversas em qualquer agent/client que suporte MCP.
+
+Instale as dependencias:
+
+```bash
+.venv/bin/python -m pip install -e ".[chat]"
+```
+
+Suba um servidor Streamable HTTP para clients externos:
+
+```bash
+.venv/bin/whatsapp-mcp --transport http --port 8765 --chat "deepmesh dev group"
+# endpoint: http://127.0.0.1:8765/mcp
+```
+
+O mesmo servidor tambem esta disponivel pelo comando principal:
+
+```bash
+.venv/bin/python -m whatsapp_reader mcp --transport http --port 8765
+```
+
+Exemplo de configuracao `stdio` para clients que preferem iniciar o processo MCP sob demanda:
+
+```json
+{
+  "mcpServers": {
+    "whatsapp-reader": {
+      "command": "/home/techbrain/andre/whatsapp-reader/.venv/bin/python",
+      "args": [
+        "-m",
+        "whatsapp_reader.mcp_server",
+        "--db",
+        "/home/techbrain/andre/whatsapp-reader/whatsapp.sqlite3",
+        "--timezone",
+        "America/Sao_Paulo",
+        "--chat",
+        "deepmesh dev group"
+      ]
+    }
+  }
+}
+```
+
 ## Chat no terminal
 
 Para conversar com o agent em um terminal com streaming e memoria por sessao:
@@ -57,6 +106,18 @@ Para conversar com o agent em um terminal com streaming e memoria por sessao:
 ```
 
 O frontend valida se ha mensagens importadas, permite escolher o chat quando existir mais de um, pede `OPENAI_API_KEY` se ela nao estiver configurada e depois abre a conversa no terminal.
+
+Por padrao o chat usa `WHATSAPP_READER_TOOLS_BACKEND=mcp`: ele sobe um MCP local via HTTP em uma porta livre, conecta as ferramentas ao LangChain e encerra esse processo quando voce sai. Para usar um MCP ja rodando:
+
+```bash
+.venv/bin/whatsapp-chat --mcp-url http://127.0.0.1:8765/mcp
+```
+
+Para diagnostico, ainda existe o backend direto antigo:
+
+```bash
+.venv/bin/whatsapp-chat --direct-tools
+```
 
 Tambem da para fixar um chat ou enviar a primeira mensagem direto:
 

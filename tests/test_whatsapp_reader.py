@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import importlib.util
 import json
 import os
 import tempfile
@@ -14,7 +16,11 @@ from whatsapp_reader.config import (
     resolve_chat_memory_db,
     resolve_chat_session,
     resolve_db_path,
+    resolve_mcp_host,
+    resolve_mcp_port,
+    resolve_mcp_url,
     resolve_timezone,
+    resolve_tools_backend,
 )
 from whatsapp_reader.conversation_tools import ConversationToolbox
 from whatsapp_reader.db import (
@@ -28,6 +34,11 @@ from whatsapp_reader.db import (
     search_messages,
 )
 from whatsapp_reader.importer import parse_export
+from whatsapp_reader.mcp_server import (
+    MCPServerConfig,
+    build_mcp_stdio_connection,
+    create_mcp_server,
+)
 from whatsapp_reader.terminal_chat import (
     _content_to_text,
     _normalize_stream_event,
@@ -196,7 +207,11 @@ class WhatsAppReaderTest(unittest.TestCase):
         env_path.write_text(
             "WHATSAPP_READER_SESSION=deepmesh\n"
             "WHATSAPP_READER_MEMORY_DB=.memory.sqlite3\n"
-            "WHATSAPP_READER_HISTORY_FILE=.history\n",
+            "WHATSAPP_READER_HISTORY_FILE=.history\n"
+            "WHATSAPP_READER_TOOLS_BACKEND=direct\n"
+            "WHATSAPP_READER_MCP_URL=http://127.0.0.1:9999/mcp\n"
+            "WHATSAPP_READER_MCP_HOST=0.0.0.0\n"
+            "WHATSAPP_READER_MCP_PORT=9999\n",
             encoding="utf-8",
         )
 
@@ -206,14 +221,63 @@ class WhatsAppReaderTest(unittest.TestCase):
             self.assertEqual(resolve_chat_session(), "deepmesh")
             self.assertEqual(resolve_chat_memory_db(), ".memory.sqlite3")
             self.assertEqual(resolve_chat_history_file(), ".history")
+            self.assertEqual(resolve_tools_backend(), "direct")
+            self.assertEqual(resolve_mcp_url(), "http://127.0.0.1:9999/mcp")
+            self.assertEqual(resolve_mcp_host(), "0.0.0.0")
+            self.assertEqual(resolve_mcp_port(), 9999)
+
+    def test_mcp_stdio_connection_builder(self) -> None:
+        connection = build_mcp_stdio_connection(
+            db_path=self.db_path,
+            timezone="America/Sao_Paulo",
+            chat_name="Family",
+            env_file=None,
+            command="python",
+            cwd=self.root,
+        )
+
+        self.assertEqual(connection["transport"], "stdio")
+        self.assertEqual(connection["command"], "python")
+        self.assertIn("whatsapp_reader.mcp_server", connection["args"])
+        self.assertIn("--chat", connection["args"])
+        self.assertEqual(connection["cwd"], str(self.root))
+
+    @unittest.skipUnless(importlib.util.find_spec("mcp"), "MCP dependencies are missing")
+    def test_mcp_server_exposes_conversation_tools(self) -> None:
+        messages = parse_export(self.export_path)
+        with connect(self.db_path) as connection:
+            import_messages(connection, messages, "Family", self.export_path)
+
+        async def run() -> tuple[list[str], dict[str, object]]:
+            server = create_mcp_server(
+                MCPServerConfig(
+                    db_path=self.db_path,
+                    timezone="America/Sao_Paulo",
+                    chat_name="Family",
+                )
+            )
+            tools = await server.list_tools()
+            _content, structured = await server.call_tool("list_chats", {})
+            return [tool.name for tool in tools], structured
+
+        tool_names, payload = asyncio.run(run())
+
+        self.assertIn("list_chats", tool_names)
+        self.assertIn("search_messages", tool_names)
+        self.assertEqual(payload["count"], 1)
+        self.assertEqual(payload["chats"][0]["chat_name"], "Family")
 
     def test_terminal_chat_stream_helpers(self) -> None:
         mode, payload = _normalize_stream_event(("messages", "payload"))
         summary = _summarize_tool_payload(json.dumps({"count": 2, "messages": []}))
+        mcp_summary = _summarize_tool_payload(
+            [{"type": "text", "text": json.dumps({"count": 1, "chats": []})}]
+        )
         text = _content_to_text([{"text": "hello"}, {"content": " world"}])
 
         self.assertEqual((mode, payload), ("messages", "payload"))
         self.assertEqual(summary, "2 mensagens")
+        self.assertEqual(mcp_summary, "1 chats")
         self.assertEqual(text, "hello world")
 
     def test_terminal_chat_onboarding_helpers(self) -> None:
@@ -237,6 +301,7 @@ class WhatsAppReaderTest(unittest.TestCase):
         self.assertIn("WHATSAPP_READER_SESSION=new", env_path.read_text(encoding="utf-8"))
         self.assertIn("A&amp;B", _status_toolbar(config))
         self.assertIn("dev&lt;1&gt;", _status_toolbar(config))
+        self.assertIn("<b>tools</b> mcp", _status_toolbar(config))
 
 
 if __name__ == "__main__":

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from contextlib import contextmanager
+import asyncio
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 import getpass
 from html import escape
@@ -8,9 +9,12 @@ import os
 from pathlib import Path
 import json
 import shlex
+import socket
+import subprocess
 import sys
+import time
 import uuid
-from typing import Any, Iterator
+from typing import Any, AsyncIterator
 
 from .agent import create_conversation_agent
 from .config import (
@@ -35,6 +39,10 @@ class TerminalChatConfig:
     session_id: str = DEFAULT_CHAT_SESSION
     memory_db: str = DEFAULT_CHAT_MEMORY_DB
     history_file: str = DEFAULT_CHAT_HISTORY_FILE
+    tools_backend: str = "mcp"
+    mcp_url: str | None = None
+    mcp_host: str = "127.0.0.1"
+    mcp_port: int = 0
     stream: bool = True
     onboarding: bool = True
     env_file: str = DEFAULT_ENV_FILE
@@ -56,12 +64,12 @@ class TerminalChatApp:
         self.prompt_session = prompt_session
         self.deps = deps
 
-    def run(self, initial_message: str | None = None) -> None:
+    async def run(self, initial_message: str | None = None) -> None:
         self._render_header()
         self._render_help_hint()
 
         if initial_message:
-            self._send_message(initial_message)
+            await self._send_message(initial_message)
 
         while True:
             try:
@@ -76,18 +84,18 @@ class TerminalChatApp:
             if not user_input:
                 continue
             if user_input.startswith("/"):
-                if self._handle_command(user_input):
+                if await self._handle_command(user_input):
                     return
                 continue
 
-            self._send_message(user_input)
+            await self._send_message(user_input)
 
-    def _send_message(self, user_input: str) -> None:
+    async def _send_message(self, user_input: str) -> None:
         if self.config.stream:
-            self._stream_message(user_input)
+            await self._stream_message(user_input)
             return
 
-        result = self.agent.invoke(
+        result = await self.agent.ainvoke(
             {"messages": [{"role": "user", "content": user_input}]},
             config=self._runtime_config(),
         )
@@ -95,18 +103,18 @@ class TerminalChatApp:
         self.console.print("[bold green]agent >[/]")
         self.console.print(self.deps["Markdown"](answer))
 
-    def _stream_message(self, user_input: str) -> None:
+    async def _stream_message(self, user_input: str) -> None:
         started_answer = False
         emitted_text = False
         seen_tool_call_ids: set[str] = set()
 
         try:
-            events = self.agent.stream(
+            events = self.agent.astream(
                 {"messages": [{"role": "user", "content": user_input}]},
                 config=self._runtime_config(),
                 stream_mode=["messages", "updates"],
             )
-            for event in events:
+            async for event in events:
                 mode, payload = _normalize_stream_event(event)
                 if mode == "messages":
                     text = _extract_chunk_text(payload)
@@ -153,7 +161,7 @@ class TerminalChatApp:
                 summary = _summarize_tool_payload(getattr(message, "content", ""))
                 self.console.print(f"[dim]ok {name}: {summary}[/]")
 
-    def _handle_command(self, command_line: str) -> bool:
+    async def _handle_command(self, command_line: str) -> bool:
         try:
             parts = shlex.split(command_line)
         except ValueError as exc:
@@ -174,7 +182,7 @@ class TerminalChatApp:
             self._render_header()
             return False
         if command == "/session":
-            self._render_session()
+            await self._render_session()
             return False
         if command == "/config":
             self._render_header()
@@ -214,7 +222,9 @@ class TerminalChatApp:
             f"db: [cyan]{self.config.db_path}[/]\n"
             f"chat: [cyan]{self.config.chat_name or '*'}[/]\n"
             f"sessao: [cyan]{self.config.session_id}[/]\n"
-            f"memoria: [cyan]{self.config.memory_db}[/]"
+            f"memoria: [cyan]{self.config.memory_db}[/]\n"
+            f"tools: [cyan]{self.config.tools_backend}[/]\n"
+            f"mcp: [cyan]{self.config.mcp_url or 'auto'}[/]"
         )
         self.console.print(Panel(body, border_style="cyan"))
 
@@ -240,7 +250,8 @@ class TerminalChatApp:
 
     def _render_tools(self) -> None:
         Table = self.deps["Table"]
-        table = Table(title="Ferramentas do Agent")
+        title = "Ferramentas MCP" if self.config.tools_backend == "mcp" else "Ferramentas do Agent"
+        table = Table(title=title)
         table.add_column("Ferramenta", style="cyan", no_wrap=True)
         table.add_column("Uso")
         table.add_row("list_chats", "Lista chats importados e intervalos.")
@@ -259,10 +270,13 @@ class TerminalChatApp:
             return
         _render_chat_table(chats, self.console, self.deps)
 
-    def _render_session(self) -> None:
+    async def _render_session(self) -> None:
         message_count = "?"
         try:
-            state = self.agent.get_state(self._runtime_config())
+            if hasattr(self.agent, "aget_state"):
+                state = await self.agent.aget_state(self._runtime_config())
+            else:
+                state = self.agent.get_state(self._runtime_config())
             messages = state.values.get("messages", []) if state.values else []
             message_count = str(len(messages))
         except Exception:
@@ -272,9 +286,19 @@ class TerminalChatApp:
         self.console.print(f"[bold]mensagens na memoria:[/] {message_count}")
         self.console.print(f"[bold]stream:[/] {'on' if self.config.stream else 'off'}")
         self.console.print(f"[bold]chat scope:[/] {self.config.chat_name or '*'}")
+        self.console.print(f"[bold]tools:[/] {self.config.tools_backend}")
+        self.console.print(f"[bold]mcp:[/] {self.config.mcp_url or 'auto'}")
 
 
 def run_terminal_chat(
+    *,
+    config: TerminalChatConfig,
+    initial_message: str | None = None,
+) -> None:
+    asyncio.run(_run_terminal_chat_async(config=config, initial_message=initial_message))
+
+
+async def _run_terminal_chat_async(
     *,
     config: TerminalChatConfig,
     initial_message: str | None = None,
@@ -285,6 +309,9 @@ def run_terminal_chat(
     config.history_file = _expand_local_path(config.history_file)
     config.memory_db = _expand_local_path(config.memory_db)
     config.env_file = _expand_local_path(config.env_file)
+    config.tools_backend = config.tools_backend.lower()
+    if config.tools_backend not in {"mcp", "direct"}:
+        raise RuntimeError(f"unsupported tools backend {config.tools_backend!r}")
 
     if config.onboarding:
         _run_onboarding(config, console, deps)
@@ -295,13 +322,17 @@ def run_terminal_chat(
         bottom_toolbar=lambda: deps["HTML"](_status_toolbar(config)),
     )
 
-    with _open_checkpointer(config.memory_db) as checkpointer:
+    async with (
+        _open_checkpointer(config.memory_db) as checkpointer,
+        _open_tool_backend(config) as tools,
+    ):
         agent = create_conversation_agent(
             db_path=config.db_path,
             timezone=config.timezone,
             model=config.model,
             default_chat=config.chat_name,
             checkpointer=checkpointer,
+            tools=tools,
         )
         app = TerminalChatApp(
             config=config,
@@ -310,7 +341,7 @@ def run_terminal_chat(
             prompt_session=prompt_session,
             deps=deps,
         )
-        app.run(initial_message=initial_message)
+        await app.run(initial_message=initial_message)
 
 
 def _load_terminal_dependencies() -> dict[str, Any]:
@@ -467,13 +498,132 @@ def _status_toolbar(config: TerminalChatConfig) -> str:
     return (
         f"<b>session</b> {escape(config.session_id)} | "
         f"<b>chat</b> {escape(config.chat_name or '*')} | "
+        f"<b>tools</b> {escape(config.tools_backend)} | "
         f"<b>stream</b> {'on' if config.stream else 'off'} | "
         "/help /exit"
     )
 
 
-@contextmanager
-def _open_checkpointer(memory_db: str) -> Iterator[Any]:
+@asynccontextmanager
+async def _open_tool_backend(config: TerminalChatConfig) -> AsyncIterator[list[Any] | None]:
+    if config.tools_backend == "direct":
+        yield None
+        return
+    if config.tools_backend != "mcp":
+        raise RuntimeError(f"unsupported tools backend {config.tools_backend!r}")
+
+    try:
+        from langchain_mcp_adapters.client import MultiServerMCPClient
+        from langchain_mcp_adapters.tools import load_mcp_tools
+    except ImportError as exc:
+        raise TerminalChatDependencyError(
+            "MCP chat dependencies are missing. Install them with "
+            '`python3 -m pip install -e ".[chat]"` inside the virtualenv.'
+        ) from exc
+
+    from .mcp_server import MCP_CONNECTION_NAME
+
+    async with _open_mcp_http_server(config) as url:
+        connection = {"transport": "http", "url": url}
+        client = MultiServerMCPClient({MCP_CONNECTION_NAME: connection})
+        async with client.session(MCP_CONNECTION_NAME) as session:
+            tools = await load_mcp_tools(session, server_name=MCP_CONNECTION_NAME)
+            yield tools
+
+
+@asynccontextmanager
+async def _open_mcp_http_server(config: TerminalChatConfig) -> AsyncIterator[str]:
+    if config.mcp_url:
+        yield config.mcp_url
+        return
+
+    port = config.mcp_port or _find_free_port(config.mcp_host)
+    client_host = _mcp_client_host(config.mcp_host)
+    url = f"http://{client_host}:{port}/mcp"
+    command = [
+        sys.executable,
+        "-m",
+        "whatsapp_reader.mcp_server",
+        "--transport",
+        "http",
+        "--host",
+        config.mcp_host,
+        "--port",
+        str(port),
+        "--db",
+        config.db_path,
+        "--timezone",
+        config.timezone,
+    ]
+    if config.env_file:
+        command.extend(["--env-file", config.env_file])
+    if config.chat_name:
+        command.extend(["--chat", config.chat_name])
+
+    process = await asyncio.create_subprocess_exec(
+        *command,
+        cwd=str(Path.cwd()),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    previous_url = config.mcp_url
+    config.mcp_url = url
+    try:
+        await _wait_for_tcp(client_host, port, process)
+        yield url
+    finally:
+        config.mcp_url = previous_url
+        await _terminate_process(process)
+
+
+def _find_free_port(host: str) -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind((host, 0))
+        return int(sock.getsockname()[1])
+
+
+def _mcp_client_host(host: str) -> str:
+    if host in {"0.0.0.0", "::"}:
+        return "127.0.0.1"
+    return host
+
+
+async def _wait_for_tcp(
+    host: str,
+    port: int,
+    process: asyncio.subprocess.Process,
+    timeout: float = 10.0,
+) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if process.returncode is not None:
+            raise RuntimeError("MCP server exited before it was ready.")
+        try:
+            _reader, writer = await asyncio.open_connection(host, port)
+        except OSError:
+            await asyncio.sleep(0.1)
+            continue
+
+        writer.close()
+        await writer.wait_closed()
+        return
+
+    raise RuntimeError(f"MCP server did not become ready at {host}:{port}.")
+
+
+async def _terminate_process(process: asyncio.subprocess.Process) -> None:
+    if process.returncode is not None:
+        return
+    process.terminate()
+    try:
+        await asyncio.wait_for(process.wait(), timeout=3)
+    except asyncio.TimeoutError:
+        process.kill()
+        await process.wait()
+
+
+@asynccontextmanager
+async def _open_checkpointer(memory_db: str) -> AsyncIterator[Any]:
     if memory_db in {"", ":memory:", "memory", "none"}:
         try:
             from langgraph.checkpoint.memory import InMemorySaver
@@ -486,7 +636,7 @@ def _open_checkpointer(memory_db: str) -> Iterator[Any]:
         return
 
     try:
-        from langgraph.checkpoint.sqlite import SqliteSaver
+        from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
     except ImportError as exc:
         raise TerminalChatDependencyError(
             "SQLite checkpoint dependency is missing. Install with "
@@ -494,7 +644,7 @@ def _open_checkpointer(memory_db: str) -> Iterator[Any]:
         ) from exc
 
     _ensure_parent_directory(memory_db)
-    with SqliteSaver.from_conn_string(_expand_local_path(memory_db)) as saver:
+    async with AsyncSqliteSaver.from_conn_string(_expand_local_path(memory_db)) as saver:
         yield saver
 
 
@@ -552,7 +702,10 @@ def _content_to_text(content: Any) -> str:
     return str(content)
 
 
-def _summarize_tool_payload(content: str) -> str:
+def _summarize_tool_payload(content: Any) -> str:
+    if not isinstance(content, str):
+        content = _content_to_text(content)
+
     try:
         payload = json.loads(content)
     except (TypeError, json.JSONDecodeError):

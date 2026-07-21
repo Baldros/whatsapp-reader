@@ -12,6 +12,9 @@ DEFAULT_AGENT_MODEL = "openai:gpt-5.6-terra"
 DEFAULT_CHAT_HISTORY_FILE = ".whatsapp-reader-history"
 DEFAULT_CHAT_MEMORY_DB = ".whatsapp-reader-memory.sqlite3"
 DEFAULT_CHAT_SESSION = "default"
+DEFAULT_MCP_HOST = "127.0.0.1"
+DEFAULT_MCP_PORT = 8765
+DEFAULT_TOOLS_BACKEND = "mcp"
 
 
 def load_env_file(path: str | Path | None = DEFAULT_ENV_FILE) -> None:
@@ -70,6 +73,33 @@ def resolve_chat_session(cli_value: str | None = None) -> str:
     if cli_value:
         return cli_value
     return os.environ.get("WHATSAPP_READER_SESSION", DEFAULT_CHAT_SESSION)
+
+
+def resolve_tools_backend(cli_value: str | None = None) -> str:
+    if cli_value:
+        return cli_value
+    return os.environ.get("WHATSAPP_READER_TOOLS_BACKEND", DEFAULT_TOOLS_BACKEND)
+
+
+def resolve_mcp_url(cli_value: str | None = None) -> str | None:
+    if cli_value:
+        return cli_value
+    return os.environ.get("WHATSAPP_READER_MCP_URL")
+
+
+def resolve_mcp_host(cli_value: str | None = None) -> str:
+    if cli_value:
+        return cli_value
+    return os.environ.get("WHATSAPP_READER_MCP_HOST", DEFAULT_MCP_HOST)
+
+
+def resolve_mcp_port(cli_value: int | None = None) -> int:
+    if cli_value is not None:
+        return cli_value
+    env_value = os.environ.get("WHATSAPP_READER_MCP_PORT")
+    if env_value:
+        return int(env_value)
+    return 0
 
 
 def _strip_env_value(value: str) -> str:

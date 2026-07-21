@@ -9,13 +9,19 @@ from .db import StoredMessage, connect, import_messages, query_messages
 from .config import (
     DEFAULT_DB,
     DEFAULT_ENV_FILE,
+    DEFAULT_MCP_HOST,
+    DEFAULT_MCP_PORT,
     load_env_file,
     resolve_agent_model,
     resolve_chat_history_file,
     resolve_chat_memory_db,
     resolve_chat_session,
     resolve_db_path,
+    resolve_mcp_host,
+    resolve_mcp_port,
+    resolve_mcp_url,
     resolve_timezone,
+    resolve_tools_backend,
 )
 from .importer import DEFAULT_TIMEZONE, ParseError, parse_export
 from .time_utils import build_time_range
@@ -36,6 +42,8 @@ def main(argv: list[str] | None = None) -> int:
             return _run_ask(args)
         if args.command == "chat":
             return _run_chat(args)
+        if args.command == "mcp":
+            return _run_mcp(args)
     except (OSError, ParseError, RuntimeError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -81,6 +89,18 @@ def build_parser() -> argparse.ArgumentParser:
     _add_common_options(chat_parser)
     add_chat_options(chat_parser)
 
+    mcp_parser = subparsers.add_parser("mcp", help="Run the WhatsApp Reader MCP server.")
+    _add_common_options(mcp_parser)
+    mcp_parser.add_argument("--chat", help="Default chat or group scope for MCP tools.")
+    mcp_parser.add_argument(
+        "--transport",
+        choices=("stdio", "http"),
+        default="stdio",
+        help="MCP transport. Use http for external clients, stdio for local agent hosts.",
+    )
+    mcp_parser.add_argument("--host", default=DEFAULT_MCP_HOST, help="HTTP host.")
+    mcp_parser.add_argument("--port", type=int, default=DEFAULT_MCP_PORT, help="HTTP port.")
+
     return parser
 
 
@@ -91,6 +111,23 @@ def add_chat_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--session", help="Conversation memory session id.")
     parser.add_argument("--memory-db", help="SQLite checkpoint database for chat memory.")
     parser.add_argument("--history-file", help="Prompt history file.")
+    parser.add_argument(
+        "--tools-backend",
+        choices=("mcp", "direct"),
+        help="Tool backend for the chat. Default: WHATSAPP_READER_TOOLS_BACKEND or mcp.",
+    )
+    parser.add_argument(
+        "--direct-tools",
+        action="store_true",
+        help="Shortcut for --tools-backend direct.",
+    )
+    parser.add_argument("--mcp-url", help="Existing Streamable HTTP MCP URL for the chat.")
+    parser.add_argument("--mcp-host", help="Host for the auto-started local MCP server.")
+    parser.add_argument(
+        "--mcp-port",
+        type=int,
+        help="Port for the auto-started local MCP server. Default: choose a free port.",
+    )
     parser.add_argument("--no-stream", action="store_true", help="Disable streamed answers.")
     parser.add_argument("--no-onboarding", action="store_true", help="Skip guided setup checks.")
 
@@ -182,6 +219,10 @@ def _run_chat(args: argparse.Namespace) -> int:
         session_id=resolve_chat_session(args.session),
         memory_db=resolve_chat_memory_db(args.memory_db),
         history_file=resolve_chat_history_file(args.history_file),
+        tools_backend="direct" if args.direct_tools else resolve_tools_backend(args.tools_backend),
+        mcp_url=resolve_mcp_url(args.mcp_url),
+        mcp_host=resolve_mcp_host(args.mcp_host),
+        mcp_port=resolve_mcp_port(args.mcp_port),
         stream=not args.no_stream,
         onboarding=not args.no_onboarding,
         env_file=args.env_file,
@@ -189,6 +230,24 @@ def _run_chat(args: argparse.Namespace) -> int:
     run_terminal_chat(
         config=config,
         initial_message=" ".join(args.message) if args.message else None,
+    )
+    return 0
+
+
+def _run_mcp(args: argparse.Namespace) -> int:
+    load_env_file(args.env_file)
+    from .mcp_server import MCPServerConfig, run_mcp_server
+
+    run_mcp_server(
+        MCPServerConfig(
+            db_path=resolve_db_path(args.db),
+            timezone=resolve_timezone(args.timezone),
+            chat_name=args.chat,
+            transport=args.transport,
+            host=args.host,
+            port=args.port,
+            env_file=args.env_file,
+        )
     )
     return 0
 

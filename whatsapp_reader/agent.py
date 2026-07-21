@@ -41,6 +41,7 @@ def create_conversation_agent(
     model: str,
     default_chat: str | None = None,
     checkpointer: Any | None = None,
+    tools: list[Any] | None = None,
 ) -> Any:
     try:
         from langchain.agents import create_agent
@@ -55,14 +56,17 @@ def create_conversation_agent(
             "OPENAI_API_KEY is required for OpenAI models. Add it to .env or export it."
         )
 
-    toolbox = ConversationToolbox(
-        db_path=db_path,
-        timezone=timezone,
-        default_chat=default_chat,
-    )
+    if tools is None:
+        toolbox = ConversationToolbox(
+            db_path=db_path,
+            timezone=timezone,
+            default_chat=default_chat,
+        )
+        tools = build_langchain_tools(toolbox)
+
     return create_agent(
         model=model,
-        tools=build_langchain_tools(toolbox),
+        tools=tools,
         system_prompt=_build_system_prompt(timezone=timezone, default_chat=default_chat),
         checkpointer=checkpointer,
     )
