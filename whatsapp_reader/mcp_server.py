@@ -62,6 +62,19 @@ def create_mcp_server(config: MCPServerConfig) -> Any:
     )
 
     @server.tool()
+    def import_conversation(
+        file_path: str,
+        chat_name: str | None = None,
+    ) -> dict[str, Any]:
+        """Import a local WhatsApp .txt export by absolute path.
+
+        The import is idempotent. Omit chat_name to use the server's default chat.
+        """
+        return _json_object(
+            toolbox.import_conversation(file_path=file_path, chat_name=chat_name)
+        )
+
+    @server.tool()
     def list_chats() -> dict[str, Any]:
         """List imported WhatsApp chats with message counts and date ranges."""
         return _json_object(toolbox.list_chats())
@@ -266,7 +279,9 @@ def _json_object(payload: str) -> dict[str, Any]:
 def _build_server_instructions(config: MCPServerConfig) -> str:
     chat_scope = config.chat_name or "all imported chats"
     return (
-        "Structured local tools for reading imported WhatsApp conversations from SQLite. "
+        "Structured local tools for importing and reading WhatsApp conversations in SQLite. "
+        "When the user provides the absolute path to a WhatsApp .txt export and asks to "
+        "ingest it, use import_conversation. "
         "Use these tools before answering questions about message contents, senders, "
         "dates, timelines, or counts. "
         f"Timezone: {config.timezone}. Default chat scope: {chat_scope}."

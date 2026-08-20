@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 import sqlite3
+from types import TracebackType
 
 from .importer import ParsedMessage
 
@@ -28,10 +29,36 @@ class ImportResult:
     skipped: int
 
 
-def connect(db_path: str | Path) -> sqlite3.Connection:
-    connection = sqlite3.connect(str(db_path))
+class ManagedConnection(sqlite3.Connection):
+    """SQLite connection that closes when its context manager exits."""
+
+    def __enter__(self) -> ManagedConnection:
+        super().__enter__()
+        self._context_depth = getattr(self, "_context_depth", 0) + 1
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> bool | None:
+        try:
+            return super().__exit__(exc_type, exc_value, traceback)
+        finally:
+            self._context_depth = max(getattr(self, "_context_depth", 1) - 1, 0)
+            if self._context_depth == 0:
+                self.close()
+
+
+def connect(db_path: str | Path) -> ManagedConnection:
+    connection = sqlite3.connect(str(db_path), factory=ManagedConnection)
     connection.row_factory = sqlite3.Row
-    initialize_schema(connection)
+    try:
+        initialize_schema(connection)
+    except BaseException:
+        connection.close()
+        raise
     return connection
 
 

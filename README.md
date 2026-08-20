@@ -7,6 +7,7 @@ O importador, as consultas e o servidor MCP não enviam dados por conta própria
 ## Funcionalidades
 
 - Importação idempotente de arquivos `.txt` exportados pelo WhatsApp.
+- Ingestão de exports locais diretamente por ferramenta MCP.
 - Consultas por chat, remetente, data e intervalo de horário.
 - Exportação de contexto limpo em JSON ou texto.
 - Agent LangChain para perguntas sobre as conversas.
@@ -96,6 +97,17 @@ Outro banco ou timezone podem ser informados explicitamente:
 
 O parser atual aceita timestamps do TXT no formato `M/D/YY, HH:mm` ou `M/D/YYYY, HH:mm`, preserva mensagens com múltiplas linhas e diferencia mensagens de usuário e de sistema. Reimportar o mesmo conteúdo não duplica as mensagens.
 
+Um client MCP também pode fazer a mesma importação chamando `import_conversation` com o caminho absoluto do `.txt`. O `chat_name` é opcional quando o servidor foi iniciado com `--chat`:
+
+```text
+import_conversation(
+  file_path="C:\Users\usuario\Downloads\WhatsApp Chat.txt",
+  chat_name="Nome do grupo"
+)
+```
+
+Essa ferramenta reutiliza o mesmo parser e a mesma importação idempotente do CLI; o comando de terminal continua disponível.
+
 ## Consultar e exportar
 
 ```bash
@@ -166,8 +178,9 @@ Comandos do chat:
 
 ## Servidor MCP
 
-O MCP expõe as mesmas ferramentas estruturadas usadas pelo agent:
+O MCP expõe as seguintes ferramentas estruturadas:
 
+- `import_conversation`
 - `list_chats`
 - `list_senders`
 - `get_messages`
@@ -321,6 +334,7 @@ Exemplo genérico de configuração `stdio`:
 - O banco SQLite contém o texto das conversas; proteja-o e inclua-o em sua rotina de backup conforme necessário.
 - Não versione `.env`, bancos, históricos ou exports privados. O `.gitignore` já cobre `.env`, `*.sqlite3` e `.whatsapp-reader-*`, mas arquivos `.txt` exportados não são ignorados automaticamente; confirme o status antes de fazer commit.
 - O servidor HTTP não implementa autenticação. Mantenha `--host 127.0.0.1` para acesso apenas pela própria máquina.
+- A ferramenta `import_conversation` pode ler um arquivo `.txt` local informado pelo client. Mantenha o endpoint restrito e só autorize caminhos esperados.
 - Não exponha a porta com `--host 0.0.0.0` sem adicionar uma camada externa adequada de autenticação, criptografia e controle de rede.
 - A chave da OpenAI não é necessária no serviço MCP; ela só é usada pelo processo do agent/chat.
 
