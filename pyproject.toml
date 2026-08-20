@@ -8,6 +8,9 @@ version = "0.1.0"
 description = "Local CLI for importing and querying WhatsApp TXT exports in SQLite."
 requires-python = ">=3.11"
 readme = "README.md"
+dependencies = [
+    "tzdata; platform_system == 'Windows'",
+]
 
 [project.optional-dependencies]
 agent = [
