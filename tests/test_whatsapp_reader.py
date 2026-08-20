@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import redirect_stdout
 import importlib.util
+from io import StringIO
 import json
 import os
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from whatsapp_reader.cli import format_messages_as_json
+from whatsapp_reader.cli import format_messages_as_json, main as cli_main
 from whatsapp_reader.config import (
     load_env_file,
     resolve_chat_history_file,
@@ -97,6 +100,13 @@ class WhatsAppReaderTest(unittest.TestCase):
         self.assertEqual(second.inserted, 0)
         self.assertEqual(second.skipped, 6)
         self.assertEqual(len(stored), 6)
+
+    def test_connection_context_manager_closes_database(self) -> None:
+        with connect(self.db_path) as connection:
+            self.assertEqual(query_messages(connection), [])
+
+        with self.assertRaises(sqlite3.ProgrammingError):
+            connection.execute("SELECT 1")
 
     def test_query_by_date_sender_interval_and_combined_filters(self) -> None:
         messages = parse_export(self.export_path)
@@ -188,6 +198,51 @@ class WhatsAppReaderTest(unittest.TestCase):
         self.assertEqual(count_payload["rows"][0]["bucket"], "2024-01-02")
         self.assertEqual(count_payload["rows"][0]["message_count"], 5)
 
+    def test_conversation_toolbox_imports_export_idempotently(self) -> None:
+        toolbox = ConversationToolbox(self.db_path, default_chat="Family")
+
+        first = json.loads(toolbox.import_conversation(str(self.export_path)))
+        second = json.loads(toolbox.import_conversation(str(self.export_path)))
+
+        self.assertEqual(first["chat_name"], "Family")
+        self.assertEqual(first["parsed"], 6)
+        self.assertEqual(first["inserted"], 6)
+        self.assertEqual(first["skipped"], 0)
+        self.assertEqual(second["inserted"], 0)
+        self.assertEqual(second["skipped"], 6)
+
+    def test_conversation_toolbox_import_validates_input(self) -> None:
+        toolbox = ConversationToolbox(self.db_path)
+
+        relative = json.loads(toolbox.import_conversation("chat.txt", "Family"))
+        wrong_extension = json.loads(
+            toolbox.import_conversation(str(self.root / "chat.json"), "Family")
+        )
+        missing_chat = json.loads(toolbox.import_conversation(str(self.export_path)))
+
+        self.assertIn("absolute path", relative["error"])
+        self.assertIn(".txt", wrong_extension["error"])
+        self.assertIn("chat_name", missing_chat["error"])
+
+    def test_cli_import_remains_available(self) -> None:
+        output = StringIO()
+        with redirect_stdout(output):
+            exit_code = cli_main(
+                [
+                    "import",
+                    str(self.export_path),
+                    "--chat",
+                    "Family",
+                    "--db",
+                    str(self.db_path),
+                ]
+            )
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("parsed=6 inserted=6 skipped=0", output.getvalue())
+        with connect(self.db_path) as connection:
+            self.assertEqual(len(query_messages(connection, chat_name="Family")), 6)
+
     def test_env_file_loading_does_not_override_existing_values(self) -> None:
         env_path = self.root / ".env"
         env_path.write_text(
@@ -248,7 +303,7 @@ class WhatsAppReaderTest(unittest.TestCase):
         with connect(self.db_path) as connection:
             import_messages(connection, messages, "Family", self.export_path)
 
-        async def run() -> tuple[list[str], dict[str, object]]:
+        async def run() -> tuple[list[str], dict[str, object], dict[str, object]]:
             server = create_mcp_server(
                 MCPServerConfig(
                     db_path=self.db_path,
@@ -258,14 +313,21 @@ class WhatsAppReaderTest(unittest.TestCase):
             )
             tools = await server.list_tools()
             _content, structured = await server.call_tool("list_chats", {})
-            return [tool.name for tool in tools], structured
+            _import_content, import_payload = await server.call_tool(
+                "import_conversation",
+                {"file_path": str(self.export_path)},
+            )
+            return [tool.name for tool in tools], structured, import_payload
 
-        tool_names, payload = asyncio.run(run())
+        tool_names, payload, import_payload = asyncio.run(run())
 
+        self.assertIn("import_conversation", tool_names)
         self.assertIn("list_chats", tool_names)
         self.assertIn("search_messages", tool_names)
         self.assertEqual(payload["count"], 1)
         self.assertEqual(payload["chats"][0]["chat_name"], "Family")
+        self.assertEqual(import_payload["inserted"], 0)
+        self.assertEqual(import_payload["skipped"], 6)
 
     def test_terminal_chat_stream_helpers(self) -> None:
         mode, payload = _normalize_stream_event(("messages", "payload"))

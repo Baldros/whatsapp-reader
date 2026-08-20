@@ -9,12 +9,13 @@ from .db import (
     connect,
     count_messages as count_message_rows,
     get_message_window,
+    import_messages,
     list_chats as list_chat_rows,
     list_senders as list_sender_rows,
     query_messages,
     search_messages as search_message_rows,
 )
-from .importer import DEFAULT_TIMEZONE
+from .importer import DEFAULT_TIMEZONE, parse_export
 from .time_utils import build_time_range
 
 
@@ -23,6 +24,46 @@ class ConversationToolbox:
     db_path: str | Path
     timezone: str = DEFAULT_TIMEZONE
     default_chat: str | None = None
+
+    def import_conversation(self, file_path: str, chat_name: str | None = None) -> str:
+        """Import a local WhatsApp TXT export into the configured SQLite database."""
+        path_value = file_path.strip()
+        if not path_value:
+            return _to_json({"error": "file_path is required"})
+
+        source_path = Path(path_value).expanduser()
+        if not source_path.is_absolute():
+            return _to_json({"error": "file_path must be an absolute path"})
+        if source_path.suffix.lower() != ".txt":
+            return _to_json({"error": "file_path must point to a .txt file"})
+
+        resolved_chat = (chat_name or self.default_chat or "").strip()
+        if not resolved_chat or resolved_chat == "*":
+            return _to_json(
+                {"error": "chat_name is required when the server has no default chat"}
+            )
+
+        try:
+            source_path = source_path.resolve(strict=True)
+            if not source_path.is_file():
+                return _to_json({"error": f"file_path is not a file: {source_path}"})
+
+            messages = parse_export(source_path, self.timezone)
+            with connect(self.db_path) as connection:
+                result = import_messages(connection, messages, resolved_chat, source_path)
+        except (OSError, ValueError) as exc:
+            return _to_json({"error": str(exc)})
+
+        return _to_json(
+            {
+                "chat_name": resolved_chat,
+                "source_file": str(source_path),
+                "timezone": self.timezone,
+                "parsed": result.parsed,
+                "inserted": result.inserted,
+                "skipped": result.skipped,
+            }
+        )
 
     def list_chats(self) -> str:
         with connect(self.db_path) as connection:
