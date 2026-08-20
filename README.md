@@ -12,13 +12,13 @@ O importador, as consultas e o servidor MCP não enviam dados por conta própria
 - Agent LangChain para perguntas sobre as conversas.
 - Chat interativo com streaming, histórico e memória por sessão.
 - Servidor MCP por `stdio` ou Streamable HTTP.
-- Execução HTTP manual ou automática com `systemd` no Linux.
+- Execução HTTP manual ou automática com `systemd` no Linux ou Agendador de Tarefas no Windows.
 
 ## Requisitos
 
 - Python 3.11 ou mais recente.
-- Linux, macOS ou outro sistema capaz de executar Python para os recursos normais.
-- Linux com `systemd` para o auto-start descrito neste projeto.
+- Linux, macOS, Windows ou outro sistema capaz de executar Python para os recursos normais.
+- Linux com `systemd` ou Windows com Agendador de Tarefas para as opções de auto-start documentadas.
 - Uma chave `OPENAI_API_KEY` apenas para os comandos `ask` e `chat` quando for usado um modelo OpenAI.
 
 ## Instalação
@@ -183,7 +183,7 @@ Há três formas comuns de executá-lo:
 | --- | --- | --- |
 | `stdio` | Client local como Codex; opção mais simples | O próprio client, sob demanda |
 | HTTP manual | Teste, desenvolvimento ou uso temporário | Você, em um terminal |
-| HTTP com auto-start | Endpoint persistente para um ou mais clients | `systemd`, no login ou boot |
+| HTTP com auto-start | Endpoint persistente para um ou mais clients | `systemd` ou Agendador de Tarefas, no login ou boot |
 
 ### Subir o servidor HTTP manualmente
 
@@ -218,6 +218,12 @@ systemctl --user enable --now whatsapp-reader-mcp.service
 Sem *linger*, o serviço inicia quando o usuário entra na sessão. Com `sudo loginctl enable-linger "$USER"`, o gerenciador de serviços desse usuário também pode iniciar no boot e continuar após logout; o MCP permanece executando sem privilégios de root.
 
 O passo a passo completo, incluindo criação da unit, validação, logs, atualização, remoção e solução de problemas, está em [docs/autostart-systemd.md](docs/autostart-systemd.md).
+
+### Auto-start no Windows
+
+No Windows, o MCP HTTP pode ser iniciado pelo Agendador de Tarefas no login do usuário, sem elevação administrativa, ou opcionalmente no boot pela conta `SYSTEM`.
+
+O passo a passo completo, incluindo instalação no PowerShell, criação e validação da tarefa, variante de boot, atualização, remoção e solução de problemas, está em [docs/autostart-windows.md](docs/autostart-windows.md).
 
 ### Adicionar ao Codex via `stdio`
 
@@ -323,7 +329,8 @@ Exemplo genérico de configuração `stdio`:
 ```text
 whatsapp_reader/               código da aplicação
 tests/                         testes automatizados
-docs/autostart-systemd.md      guia completo de auto-start
+docs/autostart-systemd.md      guia de auto-start no Linux
+docs/autostart-windows.md      guia de auto-start no Windows
 whatsapp.sqlite3               banco local padrão, criado em tempo de execução
 .whatsapp-reader-memory.sqlite3 memória local do chat, criada em tempo de execução
 ```
