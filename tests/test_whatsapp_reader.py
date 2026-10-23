@@ -5,6 +5,7 @@ from contextlib import redirect_stdout
 import importlib.util
 from io import StringIO
 import json
+import logging
 import os
 import sqlite3
 import tempfile
@@ -19,8 +20,6 @@ from whatsapp_reader.config import (
     resolve_chat_memory_db,
     resolve_chat_session,
     resolve_db_path,
-    resolve_mcp_host,
-    resolve_mcp_port,
     resolve_mcp_url,
     resolve_timezone,
     resolve_tools_backend,
@@ -41,11 +40,14 @@ from whatsapp_reader.importer import message_fingerprints, parse_export
 from whatsapp_reader.mcp_server import (
     MCPServerConfig,
     build_mcp_stdio_connection,
+    create_mcp_http_app,
     create_mcp_server,
 )
 from whatsapp_reader.terminal_chat import (
     _content_to_text,
+    _mcp_connection,
     _normalize_stream_event,
+    _open_tool_backend,
     _select_chat_from_choice,
     _status_toolbar,
     _summarize_tool_payload,
@@ -344,9 +346,7 @@ class WhatsAppReaderTest(unittest.TestCase):
             "WHATSAPP_READER_MEMORY_DB=.memory.sqlite3\n"
             "WHATSAPP_READER_HISTORY_FILE=.history\n"
             "WHATSAPP_READER_TOOLS_BACKEND=direct\n"
-            "WHATSAPP_READER_MCP_URL=http://127.0.0.1:9999/mcp\n"
-            "WHATSAPP_READER_MCP_HOST=0.0.0.0\n"
-            "WHATSAPP_READER_MCP_PORT=9999\n",
+            "WHATSAPP_READER_MCP_URL=http://127.0.0.1:9999/mcp\n",
             encoding="utf-8",
         )
 
@@ -358,8 +358,6 @@ class WhatsAppReaderTest(unittest.TestCase):
             self.assertEqual(resolve_chat_history_file(), ".history")
             self.assertEqual(resolve_tools_backend(), "direct")
             self.assertEqual(resolve_mcp_url(), "http://127.0.0.1:9999/mcp")
-            self.assertEqual(resolve_mcp_host(), "0.0.0.0")
-            self.assertEqual(resolve_mcp_port(), 9999)
 
     def test_mcp_stdio_connection_builder(self) -> None:
         connection = build_mcp_stdio_connection(
@@ -408,6 +406,97 @@ class WhatsAppReaderTest(unittest.TestCase):
         self.assertEqual(payload["chats"][0]["chat_name"], "Family")
         self.assertEqual(import_payload["inserted"], 0)
         self.assertEqual(import_payload["skipped"], 6)
+
+    @unittest.skipUnless(importlib.util.find_spec("mcp"), "MCP dependencies are missing")
+    def test_mcp_http_endpoint_only_accepts_post(self) -> None:
+        from starlette.testclient import TestClient
+
+        # Keep the test client's per-request INFO lines out of the test output.
+        logging.disable(logging.INFO)
+        self.addCleanup(logging.disable, logging.NOTSET)
+        app = create_mcp_http_app(
+            MCPServerConfig(db_path=self.db_path, timezone="America/Sao_Paulo", transport="http")
+        )
+        list_tools = {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}
+
+        # The SDK only accepts Host headers of the 127.0.0.1 server it was configured for.
+        with TestClient(app, base_url="http://127.0.0.1:8765") as client:
+            sse_get = client.get("/mcp", headers={"Accept": "text/event-stream"})
+            delete = client.delete("/mcp")
+            tools = client.post(
+                "/mcp",
+                headers={"Accept": "application/json, text/event-stream"},
+                json=list_tools,
+            )
+            discovery = client.get("/.well-known/oauth-protected-resource")
+
+        self.assertEqual(sse_get.status_code, 405)
+        self.assertEqual(sse_get.headers["allow"], "POST")
+        self.assertEqual(delete.status_code, 405)
+        self.assertEqual(tools.status_code, 200)
+        self.assertIn("list_chats", [tool["name"] for tool in tools.json()["result"]["tools"]])
+        self.assertEqual(discovery.status_code, 404)
+
+    @unittest.skipUnless(importlib.util.find_spec("mcp"), "MCP dependencies are missing")
+    def test_mcp_sdk_logs_stay_at_warning_unless_debugging(self) -> None:
+        sdk_logger = logging.getLogger("mcp")
+        self.addCleanup(sdk_logger.setLevel, sdk_logger.level)
+        logging.disable(logging.DEBUG)
+        self.addCleanup(logging.disable, logging.NOTSET)
+
+        levels = {}
+        for level in ("INFO", "DEBUG", "ERROR"):
+            create_mcp_server(
+                MCPServerConfig(db_path=self.db_path, timezone="America/Sao_Paulo", log_level=level)
+            )
+            levels[level] = sdk_logger.level
+
+        self.assertEqual(
+            levels,
+            {"INFO": logging.WARNING, "DEBUG": logging.DEBUG, "ERROR": logging.ERROR},
+        )
+
+    def test_terminal_chat_uses_stdio_unless_mcp_url_is_set(self) -> None:
+        config = TerminalChatConfig(
+            db_path=str(self.db_path),
+            timezone="America/Sao_Paulo",
+            model="openai:gpt-5.6-terra",
+            chat_name="Family",
+        )
+        stdio = _mcp_connection(config)
+        config.mcp_url = "http://127.0.0.1:8765/mcp"
+        http = _mcp_connection(config)
+
+        self.assertEqual(stdio["transport"], "stdio")
+        self.assertIn(str(self.db_path), stdio["args"])
+        self.assertIn("Family", stdio["args"])
+        self.assertEqual(http, {"transport": "http", "url": "http://127.0.0.1:8765/mcp"})
+
+    @unittest.skipUnless(
+        importlib.util.find_spec("langchain_mcp_adapters"),
+        "MCP chat dependencies are missing",
+    )
+    def test_terminal_chat_loads_tools_from_private_stdio_server(self) -> None:
+        messages = parse_export(self.export_path)
+        with connect(self.db_path) as connection:
+            import_messages(connection, messages, "Family", self.export_path)
+        config = TerminalChatConfig(
+            db_path=str(self.db_path),
+            timezone="America/Sao_Paulo",
+            model="openai:gpt-5.6-terra",
+            chat_name="Family",
+            env_file=str(self.root / ".env"),
+        )
+
+        async def run() -> tuple[list[str], object]:
+            async with _open_tool_backend(config) as tools:
+                list_chats_tool = next(tool for tool in tools if tool.name == "list_chats")
+                return [tool.name for tool in tools], await list_chats_tool.ainvoke({})
+
+        tool_names, chats = asyncio.run(run())
+
+        self.assertIn("get_messages", tool_names)
+        self.assertEqual(json.loads(_content_to_text(chats))["chats"][0]["chat_name"], "Family")
 
     def test_terminal_chat_stream_helpers(self) -> None:
         mode, payload = _normalize_stream_event(("messages", "payload"))

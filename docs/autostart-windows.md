@@ -10,7 +10,7 @@ Use este auto-start quando um client se conectar ao endpoint HTTP persistente:
 http://127.0.0.1:8765/mcp
 ```
 
-Se o client usa transporte `stdio`, ele normalmente inicia o MCP sob demanda e esta tarefa não é necessária. O chat do próprio projeto também consegue iniciar um MCP temporário automaticamente e encerrá-lo ao sair.
+Se o client usa transporte `stdio`, ele normalmente inicia o MCP sob demanda e esta tarefa não é necessária. O chat do próprio projeto também inicia seu próprio MCP via `stdio` e o encerra ao sair.
 
 ## Pré-requisitos
 
@@ -154,7 +154,7 @@ Confirme que a porta está acessível:
 Test-NetConnection 127.0.0.1 -Port 8765
 ```
 
-`TcpTestSucceeded` deve ser `True`. Uma requisição HTTP comum a `/mcp` pode receber `406 Not Acceptable`, pois o endpoint espera cabeçalhos e mensagens do protocolo MCP. A validação funcional deve ser feita por um client MCP.
+`TcpTestSucceeded` deve ser `True`. Um `GET` comum em `/mcp` recebe `405 Method Not Allowed`, pois o endpoint só aceita `POST` com mensagens do protocolo MCP. A validação funcional deve ser feita por um client MCP.
 
 Por exemplo, no Codex:
 
@@ -168,6 +168,8 @@ Se já existir uma entrada com o mesmo nome e outra configuração, remova-a ant
 ```powershell
 codex mcp remove whatsapp-reader
 ```
+
+O `codex mcp list` mostra `Unsupported` na coluna Auth, porque o servidor não usa autenticação. Para chegar a essa conclusão, o Codex consulta alguns endereços `/.well-known/...` de descoberta OAuth, que aparecem no log do servidor com `404`; é o comportamento esperado.
 
 Também é possível abrir `taskschd.msc` e localizar **WhatsApp Reader MCP** na Biblioteca do Agendador de Tarefas.
 

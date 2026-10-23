@@ -87,21 +87,6 @@ def resolve_mcp_url(cli_value: str | None = None) -> str | None:
     return os.environ.get("WHATSAPP_READER_MCP_URL")
 
 
-def resolve_mcp_host(cli_value: str | None = None) -> str:
-    if cli_value:
-        return cli_value
-    return os.environ.get("WHATSAPP_READER_MCP_HOST", DEFAULT_MCP_HOST)
-
-
-def resolve_mcp_port(cli_value: int | None = None) -> int:
-    if cli_value is not None:
-        return cli_value
-    env_value = os.environ.get("WHATSAPP_READER_MCP_PORT")
-    if env_value:
-        return int(env_value)
-    return 0
-
-
 def _strip_env_value(value: str) -> str:
     if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
         return value[1:-1]

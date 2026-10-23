@@ -58,8 +58,6 @@ WHATSAPP_READER_MEMORY_DB=.whatsapp-reader-memory.sqlite3
 WHATSAPP_READER_HISTORY_FILE=.whatsapp-reader-history
 WHATSAPP_READER_TOOLS_BACKEND=mcp
 WHATSAPP_READER_MCP_URL=
-WHATSAPP_READER_MCP_HOST=127.0.0.1
-WHATSAPP_READER_MCP_PORT=0
 ```
 
 | Variável | Uso |
@@ -72,9 +70,7 @@ WHATSAPP_READER_MCP_PORT=0
 | `WHATSAPP_READER_MEMORY_DB` | Banco SQLite da memória do chat |
 | `WHATSAPP_READER_HISTORY_FILE` | Histórico de entradas do terminal |
 | `WHATSAPP_READER_TOOLS_BACKEND` | Backend `mcp` (padrão) ou `direct` para diagnóstico |
-| `WHATSAPP_READER_MCP_URL` | URL de um MCP HTTP já em execução |
-| `WHATSAPP_READER_MCP_HOST` | Host do MCP temporário iniciado pelo chat |
-| `WHATSAPP_READER_MCP_PORT` | Porta desse MCP temporário; `0` escolhe uma porta livre |
+| `WHATSAPP_READER_MCP_URL` | URL de um MCP HTTP já em execução; vazia, o chat inicia um MCP próprio via `stdio` |
 
 As opções passadas na linha de comando, como `--db` e `--timezone`, têm precedência. Use caminhos absolutos ao configurar um client MCP ou serviço que possa iniciar fora do diretório do projeto.
 
@@ -154,7 +150,7 @@ O onboarding verifica o banco e a chave, permite escolher o chat quando houver m
 .venv/bin/python -m whatsapp_reader chat --chat "Nome do grupo"
 ```
 
-Por padrão, o chat inicia seu próprio MCP HTTP em uma porta livre e o encerra ao sair. Para usar um MCP HTTP persistente que já esteja rodando:
+Por padrão, o chat inicia seu próprio MCP como subprocesso via `stdio`, sem abrir nenhuma porta, e o encerra ao sair. Avisos e erros desse servidor aparecem no próprio terminal. Para usar um MCP HTTP persistente que já esteja rodando:
 
 ```bash
 .venv/bin/whatsapp-chat --mcp-url http://127.0.0.1:8765/mcp
@@ -215,6 +211,12 @@ Este modo mantém o processo em primeiro plano e o encerra com `Ctrl+C`:
 ```
 
 O endpoint será `http://127.0.0.1:8765/mcp`. Remova `--chat` para permitir consultas a todos os chats por padrão.
+
+O endpoint é *stateless*, responde em JSON e não tem autenticação. Ele aceita apenas `POST`; `GET` e `DELETE` recebem `405 Method Not Allowed`, pois não há stream SSE nem sessão para encerrar.
+
+O log mostra uma linha por requisição HTTP. Os logs internos do SDK MCP ficam em `WARNING`; use `--log-level DEBUG` para vê-los ou `--log-level WARNING` para esconder também as linhas de requisição.
+
+Ao listar ou conectar o servidor, clients como o Codex verificam se ele oferece login OAuth. No log, isso aparece como algumas requisições `GET /.well-known/oauth-protected-resource`, `/.well-known/oauth-authorization-server` e `/.well-known/openid-configuration` respondidas com `404`. É o esperado para um servidor sem OAuth, e o Codex mostra `Unsupported` na coluna Auth de `codex mcp list`.
 
 O mesmo servidor pode ser iniciado pelo comando principal:
 

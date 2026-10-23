@@ -9,10 +9,7 @@ import os
 from pathlib import Path
 import json
 import shlex
-import socket
-import subprocess
 import sys
-import time
 import uuid
 from typing import Any, AsyncIterator
 
@@ -41,8 +38,6 @@ class TerminalChatConfig:
     history_file: str = DEFAULT_CHAT_HISTORY_FILE
     tools_backend: str = "mcp"
     mcp_url: str | None = None
-    mcp_host: str = "127.0.0.1"
-    mcp_port: int = 0
     stream: bool = True
     onboarding: bool = True
     env_file: str = DEFAULT_ENV_FILE
@@ -224,7 +219,7 @@ class TerminalChatApp:
             f"sessao: [cyan]{self.config.session_id}[/]\n"
             f"memoria: [cyan]{self.config.memory_db}[/]\n"
             f"tools: [cyan]{self.config.tools_backend}[/]\n"
-            f"mcp: [cyan]{self.config.mcp_url or 'auto'}[/]"
+            f"mcp: [cyan]{self.config.mcp_url or 'stdio'}[/]"
         )
         self.console.print(Panel(body, border_style="cyan"))
 
@@ -287,7 +282,7 @@ class TerminalChatApp:
         self.console.print(f"[bold]stream:[/] {'on' if self.config.stream else 'off'}")
         self.console.print(f"[bold]chat scope:[/] {self.config.chat_name or '*'}")
         self.console.print(f"[bold]tools:[/] {self.config.tools_backend}")
-        self.console.print(f"[bold]mcp:[/] {self.config.mcp_url or 'auto'}")
+        self.console.print(f"[bold]mcp:[/] {self.config.mcp_url or 'stdio'}")
 
 
 def run_terminal_chat(
@@ -523,103 +518,27 @@ async def _open_tool_backend(config: TerminalChatConfig) -> AsyncIterator[list[A
 
     from .mcp_server import MCP_CONNECTION_NAME
 
-    async with _open_mcp_http_server(config) as url:
-        connection = {"transport": "http", "url": url}
-        client = MultiServerMCPClient({MCP_CONNECTION_NAME: connection})
-        async with client.session(MCP_CONNECTION_NAME) as session:
-            tools = await load_mcp_tools(session, server_name=MCP_CONNECTION_NAME)
-            yield tools
+    client = MultiServerMCPClient({MCP_CONNECTION_NAME: _mcp_connection(config)})
+    async with client.session(MCP_CONNECTION_NAME) as session:
+        tools = await load_mcp_tools(session, server_name=MCP_CONNECTION_NAME)
+        yield tools
 
 
-@asynccontextmanager
-async def _open_mcp_http_server(config: TerminalChatConfig) -> AsyncIterator[str]:
+def _mcp_connection(config: TerminalChatConfig) -> dict[str, object]:
     if config.mcp_url:
-        yield config.mcp_url
-        return
+        return {"transport": "http", "url": config.mcp_url}
 
-    port = config.mcp_port or _find_free_port(config.mcp_host)
-    client_host = _mcp_client_host(config.mcp_host)
-    url = f"http://{client_host}:{port}/mcp"
-    command = [
-        sys.executable,
-        "-m",
-        "whatsapp_reader.mcp_server",
-        "--transport",
-        "http",
-        "--host",
-        config.mcp_host,
-        "--port",
-        str(port),
-        "--db",
-        config.db_path,
-        "--timezone",
-        config.timezone,
-    ]
-    if config.env_file:
-        command.extend(["--env-file", config.env_file])
-    if config.chat_name:
-        command.extend(["--chat", config.chat_name])
+    from .mcp_server import build_mcp_stdio_connection
 
-    process = await asyncio.create_subprocess_exec(
-        *command,
-        cwd=str(Path.cwd()),
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+    # A private server over stdio: no port to pick or leave open, it exits with the
+    # chat, and its warnings and errors reach this terminal through stderr.
+    return build_mcp_stdio_connection(
+        db_path=config.db_path,
+        timezone=config.timezone,
+        chat_name=config.chat_name,
+        env_file=config.env_file,
+        cwd=Path.cwd(),
     )
-    previous_url = config.mcp_url
-    config.mcp_url = url
-    try:
-        await _wait_for_tcp(client_host, port, process)
-        yield url
-    finally:
-        config.mcp_url = previous_url
-        await _terminate_process(process)
-
-
-def _find_free_port(host: str) -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind((host, 0))
-        return int(sock.getsockname()[1])
-
-
-def _mcp_client_host(host: str) -> str:
-    if host in {"0.0.0.0", "::"}:
-        return "127.0.0.1"
-    return host
-
-
-async def _wait_for_tcp(
-    host: str,
-    port: int,
-    process: asyncio.subprocess.Process,
-    timeout: float = 10.0,
-) -> None:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if process.returncode is not None:
-            raise RuntimeError("MCP server exited before it was ready.")
-        try:
-            _reader, writer = await asyncio.open_connection(host, port)
-        except OSError:
-            await asyncio.sleep(0.1)
-            continue
-
-        writer.close()
-        await writer.wait_closed()
-        return
-
-    raise RuntimeError(f"MCP server did not become ready at {host}:{port}.")
-
-
-async def _terminate_process(process: asyncio.subprocess.Process) -> None:
-    if process.returncode is not None:
-        return
-    process.terminate()
-    try:
-        await asyncio.wait_for(process.wait(), timeout=3)
-    except asyncio.TimeoutError:
-        process.kill()
-        await process.wait()
 
 
 @asynccontextmanager
