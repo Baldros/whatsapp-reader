@@ -13,7 +13,12 @@ from .importer import ParsedMessage, message_fingerprints
 # Stored in PRAGMA user_version.
 # 1: fingerprints include the chat and the occurrence of identical messages.
 # 2: messages_fts, a full-text index of message text that ignores case and accents.
-SCHEMA_VERSION = 2
+# 3: indexes for ordering and filtering by instant instead of local timestamp text.
+SCHEMA_VERSION = 3
+
+# strftime('%s') supports SQLite versions predating unixepoch(). Stored messages have
+# whole-second precision; numeric bounds retain fractional seconds supplied by callers.
+_TIME_SQL = "CAST(strftime('%s', timestamp) AS INTEGER)"
 
 
 @dataclass(frozen=True)
@@ -119,6 +124,8 @@ def _migrate_schema(connection: sqlite3.Connection) -> None:
             _rebuild_fingerprints(connection)
         if version < 2:
             _create_text_index(connection)
+        if version < 3:
+            _create_time_indexes(connection)
         connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         connection.commit()
     except BaseException:
@@ -222,6 +229,16 @@ def _create_text_index(connection: sqlite3.Connection) -> None:
     connection.execute("INSERT INTO messages_fts(messages_fts) VALUES ('rebuild')")
 
 
+def _create_time_indexes(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        f"CREATE INDEX IF NOT EXISTS idx_messages_instant ON messages({_TIME_SQL}, id)"
+    )
+    connection.execute(
+        f"CREATE INDEX IF NOT EXISTS idx_messages_chat_instant "
+        f"ON messages(chat_name, {_TIME_SQL}, id)"
+    )
+
+
 def import_messages(
     connection: sqlite3.Connection,
     messages: list[ParsedMessage],
@@ -277,20 +294,15 @@ def query_messages(
 ) -> list[StoredMessage]:
     sql = "SELECT * FROM messages"
     conditions: list[str] = []
-    params: list[str | int] = []
-
-    if chat_name is not None:
-        conditions.append("chat_name = ?")
-        params.append(chat_name)
-    if sender is not None:
-        conditions.append("sender = ?")
-        params.append(sender)
-    if from_timestamp is not None:
-        conditions.append("timestamp >= ?")
-        params.append(from_timestamp.isoformat(timespec="seconds"))
-    if to_timestamp is not None:
-        conditions.append("timestamp <= ?")
-        params.append(to_timestamp.isoformat(timespec="seconds"))
+    params: list[object] = []
+    _append_common_filters(
+        conditions,
+        params,
+        chat_name=chat_name,
+        sender=sender,
+        from_timestamp=from_timestamp,
+        to_timestamp=to_timestamp,
+    )
 
     if conditions:
         sql += " WHERE " + " AND ".join(conditions)
@@ -353,8 +365,8 @@ def list_chats(connection: sqlite3.Connection) -> list[dict[str, object]]:
         SELECT
             chat_name,
             COUNT(*) AS message_count,
-            MIN(timestamp) AS first_timestamp,
-            MAX(timestamp) AS last_timestamp
+            MIN(strftime('%Y-%m-%dT%H:%M:%S+00:00', timestamp)) AS first_timestamp,
+            MAX(strftime('%Y-%m-%dT%H:%M:%S+00:00', timestamp)) AS last_timestamp
         FROM messages
         GROUP BY chat_name
         ORDER BY message_count DESC, chat_name ASC
@@ -373,8 +385,8 @@ def list_senders(
         SELECT
             sender,
             COUNT(*) AS message_count,
-            MIN(timestamp) AS first_timestamp,
-            MAX(timestamp) AS last_timestamp
+            MIN(strftime('%Y-%m-%dT%H:%M:%S+00:00', timestamp)) AS first_timestamp,
+            MAX(strftime('%Y-%m-%dT%H:%M:%S+00:00', timestamp)) AS last_timestamp
         FROM messages
         WHERE sender IS NOT NULL
     """
@@ -418,8 +430,8 @@ def count_messages(
         SELECT
             {expression} AS bucket,
             COUNT(*) AS message_count,
-            MIN(timestamp) AS first_timestamp,
-            MAX(timestamp) AS last_timestamp
+            MIN(strftime('%Y-%m-%dT%H:%M:%S+00:00', timestamp)) AS first_timestamp,
+            MAX(strftime('%Y-%m-%dT%H:%M:%S+00:00', timestamp)) AS last_timestamp
         FROM messages
     """
     conditions: list[str] = []
@@ -455,23 +467,25 @@ def get_message_window(
     if target is None:
         return []
 
+    # The explicit time bound lets SQLite seek the expression index before the id tie-breaker.
+    target_instant = datetime.fromisoformat(target["timestamp"]).timestamp()
     before_rows = connection.execute(
-        """
+        f"""
         SELECT * FROM messages
-        WHERE chat_name = ? AND (timestamp < ? OR (timestamp = ? AND id < ?))
-        ORDER BY timestamp DESC, id DESC
+        WHERE chat_name = ? AND {_TIME_SQL} <= ? AND ({_TIME_SQL}, id) < (?, ?)
+        ORDER BY {_TIME_SQL} DESC, id DESC
         LIMIT ?
         """,
-        (target["chat_name"], target["timestamp"], target["timestamp"], message_id, before),
+        (target["chat_name"], target_instant, target_instant, message_id, before),
     ).fetchall()
     after_rows = connection.execute(
-        """
+        f"""
         SELECT * FROM messages
-        WHERE chat_name = ? AND (timestamp > ? OR (timestamp = ? AND id > ?))
-        ORDER BY timestamp ASC, id ASC
+        WHERE chat_name = ? AND {_TIME_SQL} >= ? AND ({_TIME_SQL}, id) > (?, ?)
+        ORDER BY {_TIME_SQL} ASC, id ASC
         LIMIT ?
         """,
-        (target["chat_name"], target["timestamp"], target["timestamp"], message_id, after),
+        (target["chat_name"], target_instant, target_instant, message_id, after),
     ).fetchall()
 
     rows = list(reversed(before_rows)) + [target] + list(after_rows)
@@ -483,7 +497,7 @@ def _order_by_time(order: str) -> str:
     if order not in directions:
         raise ValueError(f"unsupported order {order!r}; use 'asc' or 'desc'")
     direction = directions[order]
-    return f" ORDER BY timestamp {direction}, id {direction}"
+    return f" ORDER BY {_TIME_SQL} {direction}, id {direction}"
 
 
 def _append_common_filters(
@@ -502,11 +516,11 @@ def _append_common_filters(
         conditions.append("sender = ?")
         params.append(sender)
     if from_timestamp is not None:
-        conditions.append("timestamp >= ?")
-        params.append(from_timestamp.isoformat(timespec="seconds"))
+        conditions.append(f"{_TIME_SQL} >= ?")
+        params.append(from_timestamp.timestamp())
     if to_timestamp is not None:
-        conditions.append("timestamp <= ?")
-        params.append(to_timestamp.isoformat(timespec="seconds"))
+        conditions.append(f"{_TIME_SQL} <= ?")
+        params.append(to_timestamp.timestamp())
 
 
 def _stored_message_from_row(row: sqlite3.Row) -> StoredMessage:

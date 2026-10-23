@@ -23,7 +23,7 @@ def build_time_range(
 
     start = parse_local_datetime(from_value, timezone) if from_value else None
     end = parse_local_datetime(to_value, timezone) if to_value else None
-    if start and end and start > end:
+    if start and end and start.timestamp() > end.timestamp():
         raise ValueError("from must be before or equal to to")
     return start, end
 
