@@ -9,6 +9,7 @@ O importador, as consultas e o servidor MCP não enviam dados por conta própria
 - Importação idempotente de arquivos `.txt` exportados pelo WhatsApp.
 - Ingestão de exports locais diretamente por ferramenta MCP.
 - Consultas por chat, remetente, data e intervalo de horário.
+- Busca de texto que ignora acentos e maiúsculas, com o índice FTS5 do SQLite.
 - Exportação de contexto limpo em JSON ou texto.
 - Agent LangChain para perguntas sobre as conversas.
 - Chat interativo com streaming, histórico e memória por sessão.
@@ -17,7 +18,7 @@ O importador, as consultas e o servidor MCP não enviam dados por conta própria
 
 ## Requisitos
 
-- Python 3.11 ou mais recente.
+- Python 3.11 ou mais recente, com o módulo `sqlite3` compilado com FTS5, como nos instaladores oficiais do Python e nas distribuições Linux comuns.
 - Linux, macOS, Windows ou outro sistema capaz de executar Python para os recursos normais.
 - Linux com `systemd` ou Windows com Agendador de Tarefas para as opções de auto-start documentadas.
 - Uma chave `OPENAI_API_KEY` apenas para os comandos `ask` e `chat` quando for usado um modelo OpenAI.
@@ -94,6 +95,8 @@ Outro banco ou timezone podem ser informados explicitamente:
 O parser atual aceita timestamps do TXT no formato `M/D/YY, HH:mm` ou `M/D/YYYY, HH:mm`, preserva mensagens com múltiplas linhas e diferencia mensagens de usuário e de sistema. Reimportar o mesmo conteúdo não duplica as mensagens. Mensagens idênticas enviadas no mesmo minuto, como várias mídias seguidas ou um "ok" repetido, são mantidas separadamente, e o mesmo export pode ser importado em chats diferentes.
 
 Bancos criados por versões anteriores ao esquema 1 descartavam essas mensagens repetidas. Na primeira abertura com a versão atual, o banco é migrado automaticamente. Depois disso, reimporte os exports originais com o mesmo `--chat` para recuperar as mensagens que faltavam; as que já estão no banco não são duplicadas. Antes de migrar, encerre os processos que ainda usam a versão antiga, como o MCP HTTP iniciado pelo Agendador de Tarefas ou pelo `systemd`.
+
+O esquema 2 acrescenta o índice de busca de texto. Ele também é criado automaticamente na primeira abertura, indexa as mensagens já importadas e não altera nenhuma delas.
 
 Um client MCP também pode fazer a mesma importação chamando `import_conversation` com o caminho absoluto do `.txt`. O `chat_name` é opcional quando o servidor foi iniciado com `--chat`:
 
@@ -187,6 +190,8 @@ O MCP expõe as seguintes ferramentas estruturadas:
 - `get_context_around`
 
 Cada parâmetro tem descrição no schema da ferramenta, incluindo os formatos de data aceitos. `get_messages` e `search_messages` devolvem as mensagens mais antigas primeiro; `order="desc"` traz as mais recentes. O resultado é limitado por `limit`, e `has_more` indica que outras mensagens também atendiam aos filtros.
+
+`search_messages` procura palavras inteiras, juntas e na ordem dada, ignorando acentos e maiúsculas: `reuniao` encontra "Reunião". A última palavra também casa com palavras mais longas, então `reuni` encontra "reuniões". Um trecho no meio de uma palavra não é encontrado: `deploy` acha "deployment", mas não "redeploy". Buscas só com emoji ou pontuação comparam o texto diretamente.
 
 O servidor também publica o recurso `whatsapp://chats` e o prompt `analyze_whatsapp_conversations` para clients que oferecem suporte a esses recursos MCP.
 

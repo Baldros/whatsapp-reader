@@ -12,7 +12,8 @@ from .importer import ParsedMessage, message_fingerprints
 
 # Stored in PRAGMA user_version.
 # 1: fingerprints include the chat and the occurrence of identical messages.
-SCHEMA_VERSION = 1
+# 2: messages_fts, a full-text index of message text that ignores case and accents.
+SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -101,8 +102,11 @@ def _migrate_schema(connection: sqlite3.Connection) -> None:
     connection.execute("BEGIN IMMEDIATE")
     try:
         # Read again under the write lock: another process may have just migrated.
-        if _schema_version(connection) < 1:
+        version = _schema_version(connection)
+        if version < 1:
             _rebuild_fingerprints(connection)
+        if version < 2:
+            _create_text_index(connection)
         connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         connection.commit()
     except BaseException:
@@ -143,6 +147,59 @@ def _rebuild_fingerprints(connection: sqlite3.Connection) -> None:
             "UPDATE messages SET fingerprint = ? WHERE id = ?",
             zip(message_fingerprints(messages, chat_name), (row[0] for row in chat_rows)),
         )
+
+
+def _create_text_index(connection: sqlite3.Connection) -> None:
+    """Create the full-text index of message text and index the existing rows.
+
+    The unicode61 tokenizer with remove_diacritics folds case and accents, so
+    "reuniao" finds "Reunião". The index keeps no copy of the text: it reads it from
+    messages, and triggers keep it in sync with inserts, updates and deletes.
+    """
+    try:
+        connection.execute(
+            """
+            CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+                text,
+                content='messages',
+                content_rowid='id',
+                tokenize='unicode61 remove_diacritics 2'
+            )
+            """
+        )
+    except sqlite3.OperationalError as exc:
+        if "fts5" not in str(exc):
+            raise
+        raise RuntimeError(
+            "This Python's SQLite has no FTS5, which text search needs. "
+            "Use a Python build whose sqlite3 module includes FTS5."
+        ) from exc
+
+    connection.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS messages_fts_insert AFTER INSERT ON messages BEGIN
+            INSERT INTO messages_fts(rowid, text) VALUES (new.id, new.text);
+        END
+        """
+    )
+    connection.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS messages_fts_delete AFTER DELETE ON messages BEGIN
+            INSERT INTO messages_fts(messages_fts, rowid, text)
+            VALUES ('delete', old.id, old.text);
+        END
+        """
+    )
+    connection.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS messages_fts_update AFTER UPDATE OF text ON messages BEGIN
+            INSERT INTO messages_fts(messages_fts, rowid, text)
+            VALUES ('delete', old.id, old.text);
+            INSERT INTO messages_fts(rowid, text) VALUES (new.id, new.text);
+        END
+        """
+    )
+    connection.execute("INSERT INTO messages_fts(messages_fts) VALUES ('rebuild')")
 
 
 def import_messages(
@@ -239,8 +296,17 @@ def search_messages(
     order: str = "asc",
 ) -> list[StoredMessage]:
     sql = "SELECT * FROM messages"
-    conditions: list[str] = ["text LIKE ?"]
-    params: list[object] = [f"%{text_query}%"]
+    conditions: list[str]
+    params: list[object]
+    if any(character.isalnum() for character in text_query):
+        # Adjacent words in this order, ignoring case and accents. The trailing * lets
+        # the last word match longer words too ("reuni" finds "reuniões").
+        conditions = ["id IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?)"]
+        params = ['"' + text_query.replace('"', '""') + '"*']
+    else:
+        # Only emoji or punctuation: the index has no words for these, so scan the text.
+        conditions = ["text LIKE ?"]
+        params = [f"%{text_query}%"]
 
     _append_common_filters(
         conditions,

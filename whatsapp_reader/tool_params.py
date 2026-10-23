@@ -65,8 +65,10 @@ TextQuery = Annotated[
     str,
     Field(
         description=(
-            "Text to find inside messages. Case is ignored only for unaccented letters, "
-            "and accents must match."
+            "Words to find, adjacent and in this order, ignoring case and accents: "
+            "'reuniao' finds 'Reunião'. Each word must match a whole word, except the "
+            "last, which also matches longer words: 'reuni' finds 'reuniões'. A query "
+            "with only emoji or punctuation is matched as plain text."
         )
     ),
 ]

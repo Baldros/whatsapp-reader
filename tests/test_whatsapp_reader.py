@@ -74,6 +74,12 @@ DUPLICATES_EXPORT = """1/2/24, 08:00 - Alice: <Media omitted>
 1/2/24, 08:02 - Bob: Done
 """
 
+SEARCH_EXPORT = """1/2/24, 08:00 - Alice: Reunião amanhã às 10h
+1/2/24, 08:01 - Bob: REUNIAO cancelada
+1/2/24, 08:02 - Alice: As reuniões da semana
+1/2/24, 08:03 - Bob: kkkk 😂
+"""
+
 
 class WhatsAppReaderTest(unittest.TestCase):
     def setUp(self) -> None:
@@ -181,6 +187,44 @@ class WhatsAppReaderTest(unittest.TestCase):
         self.assertEqual(
             [message.text for message in stored],
             ["<Media omitted>"] * 3 + ["ok"] * 2 + ["Done"],
+        )
+
+    def test_search_ignores_case_and_accents(self) -> None:
+        export_path = self._write_export("search.txt", SEARCH_EXPORT)
+        with connect(self.db_path) as connection:
+            import_messages(connection, parse_export(export_path), "Family", export_path)
+
+            def texts(query: str) -> list[str]:
+                return [message.text for message in search_messages(connection, text_query=query)]
+
+            self.assertEqual(texts("reuniao"), ["Reunião amanhã às 10h", "REUNIAO cancelada"])
+            self.assertEqual(len(texts("REUNI")), 3)
+            self.assertEqual(texts("amanha as 10H"), ["Reunião amanhã às 10h"])
+            self.assertEqual(texts("😂"), ["kkkk 😂"])
+            # Quotes and FTS5 operators in the query are plain text, not query syntax.
+            self.assertEqual(texts('reuniao" OR "kkkk'), [])
+
+    def test_migration_indexes_messages_imported_before_text_search(self) -> None:
+        export_path = self._write_export("search.txt", SEARCH_EXPORT)
+        # Simulate a database at schema version 1, before the full-text index existed.
+        with connect(self.db_path) as connection:
+            import_messages(connection, parse_export(export_path), "Family", export_path)
+            for trigger in ("insert", "delete", "update"):
+                connection.execute(f"DROP TRIGGER messages_fts_{trigger}")
+            connection.execute("DROP TABLE messages_fts")
+            connection.execute("PRAGMA user_version = 1")
+
+        with connect(self.db_path) as connection:
+            version = connection.execute("PRAGMA user_version").fetchone()[0]
+            existing = search_messages(connection, text_query="reuniao")
+            import_messages(connection, parse_export(self.export_path), "Family", self.export_path)
+            imported_later = search_messages(connection, text_query="same minute")
+
+        self.assertEqual(version, SCHEMA_VERSION)
+        self.assertEqual(len(existing), 2)
+        self.assertEqual(
+            [message.text for message in imported_later],
+            ["Same minute one", "Same minute two"],
         )
 
     def test_connection_context_manager_closes_database(self) -> None:
