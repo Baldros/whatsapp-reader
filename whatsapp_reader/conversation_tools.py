@@ -87,7 +87,9 @@ class ConversationToolbox:
         sender: str | None = None,
         chat_name: str | None = None,
         limit: int | None = 50,
+        order: str = "asc",
     ) -> str:
+        limit_value = _clamp_limit(limit, default=50, maximum=200)
         try:
             from_timestamp, to_timestamp = build_time_range(
                 date,
@@ -95,20 +97,20 @@ class ConversationToolbox:
                 to_time,
                 self.timezone,
             )
+            with connect(self.db_path) as connection:
+                messages = query_messages(
+                    connection,
+                    chat_name=self._resolve_chat(chat_name),
+                    sender=sender or None,
+                    from_timestamp=from_timestamp,
+                    to_timestamp=to_timestamp,
+                    limit=limit_value + 1,
+                    order=order,
+                )
         except ValueError as exc:
             return _to_json({"error": str(exc)})
 
-        limit_value = _clamp_limit(limit, default=50, maximum=200)
-        with connect(self.db_path) as connection:
-            messages = query_messages(
-                connection,
-                chat_name=self._resolve_chat(chat_name),
-                sender=sender or None,
-                from_timestamp=from_timestamp,
-                to_timestamp=to_timestamp,
-                limit=limit_value,
-            )
-        return _messages_payload(messages, limit_value)
+        return _page_payload(messages, limit_value)
 
     def search_messages(
         self,
@@ -119,10 +121,12 @@ class ConversationToolbox:
         sender: str | None = None,
         chat_name: str | None = None,
         limit: int | None = 50,
+        order: str = "asc",
     ) -> str:
         if not text_query.strip():
             return _to_json({"error": "text_query is required"})
 
+        limit_value = _clamp_limit(limit, default=50, maximum=200)
         try:
             from_timestamp, to_timestamp = build_time_range(
                 date,
@@ -130,21 +134,21 @@ class ConversationToolbox:
                 to_time,
                 self.timezone,
             )
+            with connect(self.db_path) as connection:
+                messages = search_message_rows(
+                    connection,
+                    text_query=text_query.strip(),
+                    chat_name=self._resolve_chat(chat_name),
+                    sender=sender or None,
+                    from_timestamp=from_timestamp,
+                    to_timestamp=to_timestamp,
+                    limit=limit_value + 1,
+                    order=order,
+                )
         except ValueError as exc:
             return _to_json({"error": str(exc)})
 
-        limit_value = _clamp_limit(limit, default=50, maximum=200)
-        with connect(self.db_path) as connection:
-            messages = search_message_rows(
-                connection,
-                text_query=text_query.strip(),
-                chat_name=self._resolve_chat(chat_name),
-                sender=sender or None,
-                from_timestamp=from_timestamp,
-                to_timestamp=to_timestamp,
-                limit=limit_value,
-            )
-        return _messages_payload(messages, limit_value)
+        return _page_payload(messages, limit_value)
 
     def count_messages(
         self,
@@ -201,14 +205,21 @@ class ConversationToolbox:
         return chat_name or self.default_chat
 
 
-def _messages_payload(messages: list[StoredMessage], limit: int) -> str:
-    return _to_json(
-        {
-            "count": len(messages),
-            "limit": limit,
-            "messages": [_message_to_dict(message) for message in messages],
-        }
-    )
+def _page_payload(messages: list[StoredMessage], limit: int) -> str:
+    """Payload for a query run with limit + 1: a surplus row means more messages matched."""
+    return _messages_payload(messages[:limit], limit, has_more=len(messages) > limit)
+
+
+def _messages_payload(
+    messages: list[StoredMessage],
+    limit: int,
+    has_more: bool | None = None,
+) -> str:
+    payload: dict[str, object] = {"count": len(messages), "limit": limit}
+    if has_more is not None:
+        payload["has_more"] = has_more
+    payload["messages"] = [_message_to_dict(message) for message in messages]
+    return _to_json(payload)
 
 
 def _message_to_dict(message: StoredMessage) -> dict[str, object]:

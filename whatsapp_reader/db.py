@@ -196,6 +196,7 @@ def query_messages(
     from_timestamp: datetime | None = None,
     to_timestamp: datetime | None = None,
     limit: int | None = None,
+    order: str = "asc",
 ) -> list[StoredMessage]:
     sql = "SELECT * FROM messages"
     conditions: list[str] = []
@@ -217,7 +218,7 @@ def query_messages(
     if conditions:
         sql += " WHERE " + " AND ".join(conditions)
 
-    sql += " ORDER BY timestamp ASC, id ASC"
+    sql += _order_by_time(order)
     if limit is not None:
         sql += " LIMIT ?"
         params.append(limit)
@@ -235,6 +236,7 @@ def search_messages(
     from_timestamp: datetime | None = None,
     to_timestamp: datetime | None = None,
     limit: int | None = None,
+    order: str = "asc",
 ) -> list[StoredMessage]:
     sql = "SELECT * FROM messages"
     conditions: list[str] = ["text LIKE ?"]
@@ -250,7 +252,7 @@ def search_messages(
     )
 
     sql += " WHERE " + " AND ".join(conditions)
-    sql += " ORDER BY timestamp ASC, id ASC"
+    sql += _order_by_time(order)
     if limit is not None:
         sql += " LIMIT ?"
         params.append(limit)
@@ -388,6 +390,14 @@ def get_message_window(
 
     rows = list(reversed(before_rows)) + [target] + list(after_rows)
     return [_stored_message_from_row(row) for row in rows]
+
+
+def _order_by_time(order: str) -> str:
+    directions = {"asc": "ASC", "desc": "DESC"}
+    if order not in directions:
+        raise ValueError(f"unsupported order {order!r}; use 'asc' or 'desc'")
+    direction = directions[order]
+    return f" ORDER BY timestamp {direction}, id {direction}"
 
 
 def _append_common_filters(

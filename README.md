@@ -117,7 +117,7 @@ Essa ferramenta reutiliza o mesmo parser e a mesma importação idempotente do C
 .venv/bin/whatsapp-reader export-context --chat "Nome do grupo" --format txt
 ```
 
-Os filtros `--chat`, `--sender`, `--date`, `--from` e `--to` podem ser combinados. Execute o help geral ou de um subcomando para ver todas as opções:
+Os filtros `--chat`, `--sender`, `--date`, `--from` e `--to` podem ser combinados. `--from` e `--to` aceitam `YYYY-MM-DD HH:MM` no timezone configurado ou ISO 8601 com fuso, como `2026-07-20T12:00:00Z`, que é convertido para esse timezone; uma data sem horário é recusada. Execute o help geral ou de um subcomando para ver todas as opções:
 
 ```bash
 .venv/bin/whatsapp-reader --help
@@ -185,6 +185,8 @@ O MCP expõe as seguintes ferramentas estruturadas:
 - `search_messages`
 - `count_messages`
 - `get_context_around`
+
+Cada parâmetro tem descrição no schema da ferramenta, incluindo os formatos de data aceitos. `get_messages` e `search_messages` devolvem as mensagens mais antigas primeiro; `order="desc"` traz as mais recentes. O resultado é limitado por `limit`, e `has_more` indica que outras mensagens também atendiam aos filtros.
 
 O servidor também publica o recurso `whatsapp://chats` e o prompt `analyze_whatsapp_conversations` para clients que oferecem suporte a esses recursos MCP.
 

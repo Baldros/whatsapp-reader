@@ -280,6 +280,47 @@ class WhatsAppReaderTest(unittest.TestCase):
         self.assertEqual(count_payload["rows"][0]["bucket"], "2024-01-02")
         self.assertEqual(count_payload["rows"][0]["message_count"], 5)
 
+    def test_message_queries_report_has_more_and_support_desc_order(self) -> None:
+        toolbox = ConversationToolbox(self.db_path, default_chat="Family")
+        toolbox.import_conversation(str(self.export_path))
+
+        oldest = json.loads(toolbox.get_messages(limit=2))
+        latest = json.loads(toolbox.get_messages(limit=2, order="desc"))
+        everything = json.loads(toolbox.get_messages(limit=6))
+        search = json.loads(toolbox.search_messages("Same minute", limit=1, order="desc"))
+        invalid = json.loads(toolbox.get_messages(order="newest"))
+
+        self.assertEqual(
+            [m["text"] for m in oldest["messages"]],
+            ["First message", "List:\n- item one\n- item two"],
+        )
+        self.assertTrue(oldest["has_more"])
+        self.assertEqual([m["text"] for m in latest["messages"]], ["Next day", "Same minute two"])
+        self.assertEqual((everything["count"], everything["has_more"]), (6, False))
+        self.assertEqual(search["messages"][0]["text"], "Same minute two")
+        self.assertTrue(search["has_more"])
+        self.assertIn("order", invalid["error"])
+
+    def test_time_filters_accept_iso_with_offset_and_require_a_time(self) -> None:
+        toolbox = ConversationToolbox(self.db_path, default_chat="Family")
+        toolbox.import_conversation(str(self.export_path))
+
+        utc = json.loads(
+            toolbox.get_messages(from_time="2024-01-02T11:03:00Z", to_time="2024-01-02T08:03:00-03:00")
+        )
+        local = json.loads(
+            toolbox.get_messages(from_time="2024-01-02 08:03", to_time="2024-01-02T08:03")
+        )
+        time_only = json.loads(toolbox.get_messages(from_time="08:03"))
+        date_only = json.loads(toolbox.get_messages(to_time="2024-01-02"))
+        bad_date = json.loads(toolbox.get_messages(date="02/01/2024"))
+
+        self.assertEqual([m["text"] for m in utc["messages"]], ["Same minute one", "Same minute two"])
+        self.assertEqual(local["messages"], utc["messages"])
+        self.assertIn("expected YYYY-MM-DD HH:MM", time_only["error"])
+        self.assertIn("expected YYYY-MM-DD HH:MM", date_only["error"])
+        self.assertEqual(bad_date["error"], "invalid date '02/01/2024'; expected YYYY-MM-DD")
+
     def test_conversation_toolbox_imports_export_idempotently(self) -> None:
         toolbox = ConversationToolbox(self.db_path, default_chat="Family")
 
@@ -406,6 +447,42 @@ class WhatsAppReaderTest(unittest.TestCase):
         self.assertEqual(payload["chats"][0]["chat_name"], "Family")
         self.assertEqual(import_payload["inserted"], 0)
         self.assertEqual(import_payload["skipped"], 6)
+
+    @unittest.skipUnless(importlib.util.find_spec("mcp"), "MCP dependencies are missing")
+    def test_mcp_tool_schemas_describe_every_parameter(self) -> None:
+        server = create_mcp_server(
+            MCPServerConfig(db_path=self.db_path, timezone="America/Sao_Paulo")
+        )
+        tools = {tool.name: tool.inputSchema["properties"] for tool in asyncio.run(server.list_tools())}
+
+        undescribed = [
+            (tool_name, parameter)
+            for tool_name, parameters in tools.items()
+            for parameter, schema in parameters.items()
+            if not schema.get("description")
+        ]
+        self.assertEqual(undescribed, [])
+        self.assertEqual(tools["get_messages"]["order"]["enum"], ["asc", "desc"])
+        self.assertEqual(tools["search_messages"]["order"]["enum"], ["asc", "desc"])
+        self.assertEqual(
+            tools["count_messages"]["group_by"]["enum"],
+            ["chat", "sender", "date", "hour", "message_type"],
+        )
+
+    @unittest.skipUnless(importlib.util.find_spec("langchain"), "Agent dependencies are missing")
+    def test_agent_tools_share_the_described_parameters(self) -> None:
+        from whatsapp_reader.agent import build_langchain_tools
+
+        tools = {tool.name: tool.args for tool in build_langchain_tools(ConversationToolbox(self.db_path))}
+
+        undescribed = [
+            (tool_name, parameter)
+            for tool_name, parameters in tools.items()
+            for parameter, schema in parameters.items()
+            if not schema.get("description")
+        ]
+        self.assertEqual(undescribed, [])
+        self.assertEqual(tools["get_messages"]["order"]["enum"], ["asc", "desc"])
 
     @unittest.skipUnless(importlib.util.find_spec("mcp"), "MCP dependencies are missing")
     def test_mcp_http_endpoint_only_accepts_post(self) -> None:

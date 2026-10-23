@@ -1,4 +1,6 @@
-from __future__ import annotations
+# No `from __future__ import annotations`: the tool signatures in create_mcp_server use
+# parameter types imported inside that function, and FastMCP evaluates string
+# annotations against module globals only.
 
 import argparse
 from dataclasses import dataclass
@@ -71,15 +73,31 @@ def create_mcp_server(config: MCPServerConfig) -> Any:
     )
     _configure_sdk_logging(config.log_level)
 
+    from .tool_params import (
+        BucketLimit,
+        ChatName,
+        ContextAfter,
+        ContextBefore,
+        Date,
+        FromTime,
+        GroupBy,
+        ImportChatName,
+        ImportFilePath,
+        MessageId,
+        MessageLimit,
+        MessageOrder,
+        Sender,
+        SenderLimit,
+        TextQuery,
+        ToTime,
+    )
+
     @server.tool()
     def import_conversation(
-        file_path: str,
-        chat_name: str | None = None,
+        file_path: ImportFilePath,
+        chat_name: ImportChatName = None,
     ) -> dict[str, Any]:
-        """Import a local WhatsApp .txt export by absolute path.
-
-        The import is idempotent. Omit chat_name to use the server's default chat.
-        """
+        """Import a local WhatsApp .txt export. Reimporting the same export adds nothing."""
         return _json_object(
             toolbox.import_conversation(file_path=file_path, chat_name=chat_name)
         )
@@ -90,20 +108,25 @@ def create_mcp_server(config: MCPServerConfig) -> Any:
         return _json_object(toolbox.list_chats())
 
     @server.tool()
-    def list_senders(chat_name: str | None = None, limit: int = 100) -> dict[str, Any]:
-        """List senders in a chat. Use chat_name='*' to ignore the default chat scope."""
+    def list_senders(chat_name: ChatName = None, limit: SenderLimit = 100) -> dict[str, Any]:
+        """List the senders of a chat with message counts, most active first."""
         return _json_object(toolbox.list_senders(chat_name=chat_name, limit=limit))
 
     @server.tool()
     def get_messages(
-        date: str | None = None,
-        from_time: str | None = None,
-        to_time: str | None = None,
-        sender: str | None = None,
-        chat_name: str | None = None,
-        limit: int = 50,
+        date: Date = None,
+        from_time: FromTime = None,
+        to_time: ToTime = None,
+        sender: Sender = None,
+        chat_name: ChatName = None,
+        limit: MessageLimit = 50,
+        order: MessageOrder = "asc",
     ) -> dict[str, Any]:
-        """Fetch chronological messages by date, time range, sender, and chat."""
+        """Fetch messages by day, time range, sender, and chat.
+
+        Oldest first unless order='desc'. Check has_more before treating the result as
+        complete.
+        """
         return _json_object(
             toolbox.get_messages(
                 date=date,
@@ -112,20 +135,26 @@ def create_mcp_server(config: MCPServerConfig) -> Any:
                 sender=sender,
                 chat_name=chat_name,
                 limit=limit,
+                order=order,
             )
         )
 
     @server.tool()
     def search_messages(
-        text_query: str,
-        date: str | None = None,
-        from_time: str | None = None,
-        to_time: str | None = None,
-        sender: str | None = None,
-        chat_name: str | None = None,
-        limit: int = 50,
+        text_query: TextQuery,
+        date: Date = None,
+        from_time: FromTime = None,
+        to_time: ToTime = None,
+        sender: Sender = None,
+        chat_name: ChatName = None,
+        limit: MessageLimit = 50,
+        order: MessageOrder = "asc",
     ) -> dict[str, Any]:
-        """Search message text with optional date, time range, sender, and chat filters."""
+        """Search message text, optionally filtered by day, time range, sender, and chat.
+
+        Oldest first unless order='desc'. Check has_more before treating the result as
+        complete.
+        """
         return _json_object(
             toolbox.search_messages(
                 text_query=text_query,
@@ -135,20 +164,21 @@ def create_mcp_server(config: MCPServerConfig) -> Any:
                 sender=sender,
                 chat_name=chat_name,
                 limit=limit,
+                order=order,
             )
         )
 
     @server.tool()
     def count_messages(
-        group_by: str = "sender",
-        date: str | None = None,
-        from_time: str | None = None,
-        to_time: str | None = None,
-        sender: str | None = None,
-        chat_name: str | None = None,
-        limit: int = 100,
+        group_by: GroupBy = "sender",
+        date: Date = None,
+        from_time: FromTime = None,
+        to_time: ToTime = None,
+        sender: Sender = None,
+        chat_name: ChatName = None,
+        limit: BucketLimit = 100,
     ) -> dict[str, Any]:
-        """Count messages grouped by chat, sender, date, hour, or message_type."""
+        """Count messages per chat, sender, day, hour, or message type."""
         return _json_object(
             toolbox.count_messages(
                 group_by=group_by,
@@ -163,11 +193,11 @@ def create_mcp_server(config: MCPServerConfig) -> Any:
 
     @server.tool()
     def get_context_around(
-        message_id: int,
-        before: int = 10,
-        after: int = 10,
+        message_id: MessageId,
+        before: ContextBefore = 10,
+        after: ContextAfter = 10,
     ) -> dict[str, Any]:
-        """Fetch neighboring messages in the same chat around a specific message id."""
+        """Fetch the messages around a message, in the same chat and in order."""
         return _json_object(
             toolbox.get_context_around(message_id=message_id, before=before, after=after)
         )
@@ -378,6 +408,9 @@ def _build_server_instructions(config: MCPServerConfig) -> str:
         "ingest it, use import_conversation. "
         "Use these tools before answering questions about message contents, senders, "
         "dates, timelines, or counts. "
+        "Message results are capped by limit and come oldest first: use order='desc' "
+        "for the most recent messages, and when has_more is true, fetch more before "
+        "concluding. "
         f"Timezone: {config.timezone}. Default chat scope: {chat_scope}."
     )
 
