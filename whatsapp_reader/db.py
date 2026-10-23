@@ -337,8 +337,8 @@ def search_messages(
         params = ['"' + text_query.replace('"', '""') + '"*']
     else:
         # Only emoji or punctuation: the index has no words for these, so scan the text.
-        conditions = ["text LIKE ?"]
-        params = [f"%{text_query}%"]
+        conditions = ["instr(text, ?) > 0"]
+        params = [text_query]
 
     _append_common_filters(
         conditions,
