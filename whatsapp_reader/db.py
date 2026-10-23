@@ -37,7 +37,7 @@ class ImportResult:
 
 
 class ManagedConnection(sqlite3.Connection):
-    """SQLite connection that closes when its context manager exits."""
+    """SQLite connection whose outermost context commits or rolls back, then closes."""
 
     def __enter__(self) -> ManagedConnection:
         super().__enter__()
@@ -50,12 +50,16 @@ class ManagedConnection(sqlite3.Connection):
         exc_value: BaseException | None,
         traceback: TracebackType | None,
     ) -> bool | None:
+        self._context_depth = max(getattr(self, "_context_depth", 1) - 1, 0)
+        if self._context_depth:
+            # Helpers may enter again; successful nested contexts must not commit.
+            if exc_type is not None:
+                self.rollback()
+            return None
         try:
             return super().__exit__(exc_type, exc_value, traceback)
         finally:
-            self._context_depth = max(getattr(self, "_context_depth", 1) - 1, 0)
-            if self._context_depth == 0:
-                self.close()
+            self.close()
 
 
 def connect(db_path: str | Path) -> ManagedConnection:
@@ -70,6 +74,10 @@ def connect(db_path: str | Path) -> ManagedConnection:
 
 
 def initialize_schema(connection: sqlite3.Connection) -> None:
+    _migrate_schema(connection)
+
+
+def _create_base_schema(connection: sqlite3.Connection) -> None:
     connection.execute(
         """
         CREATE TABLE IF NOT EXISTS messages (
@@ -91,18 +99,22 @@ def initialize_schema(connection: sqlite3.Connection) -> None:
     connection.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_fingerprint ON messages(fingerprint)"
     )
-    connection.commit()
-    _migrate_schema(connection)
 
 
 def _migrate_schema(connection: sqlite3.Connection) -> None:
-    if _schema_version(connection) >= SCHEMA_VERSION:
-        return
+    _check_schema_version(_schema_version(connection))
 
     connection.execute("BEGIN IMMEDIATE")
     try:
-        # Read again under the write lock: another process may have just migrated.
+        # Even an apparently current database may be undergoing an upgrade. Wait for
+        # its writer, then validate again before touching any schema or version marker.
         version = _schema_version(connection)
+        _check_schema_version(version)
+        if version == SCHEMA_VERSION:
+            connection.commit()
+            return
+
+        _create_base_schema(connection)
         if version < 1:
             _rebuild_fingerprints(connection)
         if version < 2:
@@ -112,6 +124,14 @@ def _migrate_schema(connection: sqlite3.Connection) -> None:
     except BaseException:
         connection.rollback()
         raise
+
+
+def _check_schema_version(version: int) -> None:
+    if version > SCHEMA_VERSION:
+        raise RuntimeError(
+            f"Database schema {version} is newer than supported schema {SCHEMA_VERSION}. "
+            "Upgrade WhatsApp Reader before opening this database."
+        )
 
 
 def _schema_version(connection: sqlite3.Connection) -> int:
