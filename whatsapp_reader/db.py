@@ -2,11 +2,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from itertools import groupby
 from pathlib import Path
 import sqlite3
 from types import TracebackType
 
-from .importer import ParsedMessage
+from .importer import ParsedMessage, message_fingerprints
+
+
+# Stored in PRAGMA user_version.
+# 1: fingerprints include the chat and the occurrence of identical messages.
+SCHEMA_VERSION = 1
 
 
 @dataclass(frozen=True)
@@ -85,6 +91,58 @@ def initialize_schema(connection: sqlite3.Connection) -> None:
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_fingerprint ON messages(fingerprint)"
     )
     connection.commit()
+    _migrate_schema(connection)
+
+
+def _migrate_schema(connection: sqlite3.Connection) -> None:
+    if _schema_version(connection) >= SCHEMA_VERSION:
+        return
+
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        # Read again under the write lock: another process may have just migrated.
+        if _schema_version(connection) < 1:
+            _rebuild_fingerprints(connection)
+        connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+        connection.commit()
+    except BaseException:
+        connection.rollback()
+        raise
+
+
+def _schema_version(connection: sqlite3.Connection) -> int:
+    return connection.execute("PRAGMA user_version").fetchone()[0]
+
+
+def _rebuild_fingerprints(connection: sqlite3.Connection) -> None:
+    """Recompute fingerprints written before version 1.
+
+    Older fingerprints ignored the chat and collapsed identical messages sent in the
+    same minute. Rows are renumbered in insertion order, so reimporting the original
+    export afterwards inserts only the messages that were collapsed.
+    """
+    rows = connection.execute(
+        """
+        SELECT id, chat_name, timestamp, sender, text, message_type
+        FROM messages
+        ORDER BY chat_name ASC, timestamp ASC, id ASC
+        """
+    ).fetchall()
+    for chat_name, chat_rows in groupby(rows, key=lambda row: row[1]):
+        chat_rows = list(chat_rows)
+        messages = [
+            ParsedMessage(
+                timestamp=datetime.fromisoformat(timestamp),
+                sender=sender,
+                text=text,
+                message_type=message_type,
+            )
+            for _id, _chat, timestamp, sender, text, message_type in chat_rows
+        ]
+        connection.executemany(
+            "UPDATE messages SET fingerprint = ? WHERE id = ?",
+            zip(message_fingerprints(messages, chat_name), (row[0] for row in chat_rows)),
+        )
 
 
 def import_messages(
@@ -98,7 +156,7 @@ def import_messages(
     inserted = 0
 
     with connection:
-        for message in messages:
+        for message, fingerprint in zip(messages, message_fingerprints(messages, chat_name)):
             cursor = connection.execute(
                 """
                 INSERT OR IGNORE INTO messages (
@@ -120,7 +178,7 @@ def import_messages(
                     message.text,
                     message.message_type,
                     source_path,
-                    message.fingerprint,
+                    fingerprint,
                     created_at,
                 ),
             )

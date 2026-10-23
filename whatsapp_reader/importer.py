@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections import Counter
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
 from hashlib import sha256
@@ -28,18 +30,27 @@ class ParsedMessage:
     text: str
     message_type: str
 
-    @property
-    def fingerprint(self) -> str:
-        sender = self.sender or ""
-        payload = "\x1f".join(
-            [
-                self.timestamp.isoformat(timespec="seconds"),
-                sender,
-                self.text,
-                self.message_type,
-            ]
+
+def message_fingerprints(messages: Iterable[ParsedMessage], chat_name: str) -> list[str]:
+    """Fingerprint messages of one chat, in export order.
+
+    Identical messages in the same minute are common (several photos, repeated "ok"),
+    so each one is numbered by occurrence. Reimporting the same export yields the same
+    fingerprints, which keeps imports idempotent without collapsing real duplicates.
+    """
+    occurrences: Counter[tuple[str, str, str, str]] = Counter()
+    fingerprints: list[str] = []
+    for message in messages:
+        key = (
+            message.timestamp.isoformat(timespec="seconds"),
+            message.sender or "",
+            message.text,
+            message.message_type,
         )
-        return sha256(payload.encode("utf-8")).hexdigest()
+        occurrences[key] += 1
+        payload = "\x1f".join([chat_name, *key, str(occurrences[key])])
+        fingerprints.append(sha256(payload.encode("utf-8")).hexdigest())
+    return fingerprints
 
 
 def parse_export(path: str | Path, timezone_name: str = DEFAULT_TIMEZONE) -> list[ParsedMessage]:

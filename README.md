@@ -95,7 +95,9 @@ Outro banco ou timezone podem ser informados explicitamente:
   --timezone America/Sao_Paulo
 ```
 
-O parser atual aceita timestamps do TXT no formato `M/D/YY, HH:mm` ou `M/D/YYYY, HH:mm`, preserva mensagens com múltiplas linhas e diferencia mensagens de usuário e de sistema. Reimportar o mesmo conteúdo não duplica as mensagens.
+O parser atual aceita timestamps do TXT no formato `M/D/YY, HH:mm` ou `M/D/YYYY, HH:mm`, preserva mensagens com múltiplas linhas e diferencia mensagens de usuário e de sistema. Reimportar o mesmo conteúdo não duplica as mensagens. Mensagens idênticas enviadas no mesmo minuto, como várias mídias seguidas ou um "ok" repetido, são mantidas separadamente, e o mesmo export pode ser importado em chats diferentes.
+
+Bancos criados por versões anteriores ao esquema 1 descartavam essas mensagens repetidas. Na primeira abertura com a versão atual, o banco é migrado automaticamente. Depois disso, reimporte os exports originais com o mesmo `--chat` para recuperar as mensagens que faltavam; as que já estão no banco não são duplicadas. Antes de migrar, encerre os processos que ainda usam a versão antiga, como o MCP HTTP iniciado pelo Agendador de Tarefas ou pelo `systemd`.
 
 Um client MCP também pode fazer a mesma importação chamando `import_conversation` com o caminho absoluto do `.txt`. O `chat_name` é opcional quando o servidor foi iniciado com `--chat`:
 

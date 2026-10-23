@@ -27,6 +27,7 @@ from whatsapp_reader.config import (
 )
 from whatsapp_reader.conversation_tools import ConversationToolbox
 from whatsapp_reader.db import (
+    SCHEMA_VERSION,
     connect,
     count_messages,
     get_message_window,
@@ -36,7 +37,7 @@ from whatsapp_reader.db import (
     query_messages,
     search_messages,
 )
-from whatsapp_reader.importer import parse_export
+from whatsapp_reader.importer import message_fingerprints, parse_export
 from whatsapp_reader.mcp_server import (
     MCPServerConfig,
     build_mcp_stdio_connection,
@@ -63,6 +64,14 @@ SAMPLE_EXPORT = """1/2/24, 08:00 - Alice: First message
 1/3/24, 09:00 - Carol: Next day
 """
 
+DUPLICATES_EXPORT = """1/2/24, 08:00 - Alice: <Media omitted>
+1/2/24, 08:00 - Alice: <Media omitted>
+1/2/24, 08:00 - Alice: <Media omitted>
+1/2/24, 08:01 - Bob: ok
+1/2/24, 08:01 - Bob: ok
+1/2/24, 08:02 - Bob: Done
+"""
+
 
 class WhatsAppReaderTest(unittest.TestCase):
     def setUp(self) -> None:
@@ -72,6 +81,11 @@ class WhatsAppReaderTest(unittest.TestCase):
         self.export_path = self.root / "chat.txt"
         self.export_path.write_text(SAMPLE_EXPORT, encoding="utf-8")
         self.db_path = self.root / "messages.sqlite3"
+
+    def _write_export(self, name: str, content: str) -> Path:
+        path = self.root / name
+        path.write_text(content, encoding="utf-8")
+        return path
 
     def test_parse_simple_multiline_system_and_same_minute_messages(self) -> None:
         messages = parse_export(self.export_path)
@@ -84,7 +98,17 @@ class WhatsAppReaderTest(unittest.TestCase):
         self.assertEqual(messages[2].message_type, "system")
         self.assertEqual(messages[2].text, "Alice pinned a message")
         self.assertEqual(messages[3].timestamp, messages[4].timestamp)
-        self.assertNotEqual(messages[3].fingerprint, messages[4].fingerprint)
+        fingerprints = message_fingerprints(messages, "Family")
+        self.assertNotEqual(fingerprints[3], fingerprints[4])
+
+    def test_fingerprints_number_identical_messages_and_depend_on_chat(self) -> None:
+        messages = parse_export(self._write_export("duplicates.txt", DUPLICATES_EXPORT))
+        family = message_fingerprints(messages, "Family")
+
+        self.assertEqual(messages[0], messages[1])
+        self.assertEqual(len(set(family)), len(messages))
+        self.assertEqual(family, message_fingerprints(messages, "Family"))
+        self.assertTrue(set(family).isdisjoint(message_fingerprints(messages, "Work")))
 
     def test_reimport_skips_existing_messages(self) -> None:
         messages = parse_export(self.export_path)
@@ -100,6 +124,62 @@ class WhatsAppReaderTest(unittest.TestCase):
         self.assertEqual(second.inserted, 0)
         self.assertEqual(second.skipped, 6)
         self.assertEqual(len(stored), 6)
+
+    def test_identical_messages_in_same_minute_are_all_kept(self) -> None:
+        export_path = self._write_export("duplicates.txt", DUPLICATES_EXPORT)
+        messages = parse_export(export_path)
+        with connect(self.db_path) as connection:
+            first = import_messages(connection, messages, "Family", export_path)
+            second = import_messages(connection, messages, "Family", export_path)
+            stored = query_messages(connection)
+
+        self.assertEqual((first.parsed, first.inserted, first.skipped), (6, 6, 0))
+        self.assertEqual((second.parsed, second.inserted, second.skipped), (6, 0, 6))
+        self.assertEqual(
+            [message.text for message in stored],
+            ["<Media omitted>"] * 3 + ["ok"] * 2 + ["Done"],
+        )
+
+    def test_same_export_imports_into_each_chat(self) -> None:
+        messages = parse_export(self.export_path)
+        with connect(self.db_path) as connection:
+            family = import_messages(connection, messages, "Family", self.export_path)
+            work = import_messages(connection, messages, "Work", self.export_path)
+            chats = list_chats(connection)
+
+        self.assertEqual(family.inserted, 6)
+        self.assertEqual(work.inserted, 6)
+        self.assertEqual(
+            {chat["chat_name"]: chat["message_count"] for chat in chats},
+            {"Family": 6, "Work": 6},
+        )
+
+    def test_migration_lets_reimport_recover_collapsed_messages(self) -> None:
+        export_path = self._write_export("duplicates.txt", DUPLICATES_EXPORT)
+        messages = parse_export(export_path)
+        collapsed = list(dict.fromkeys(messages))
+
+        # Simulate a database written before schema version 1: identical messages
+        # collapsed into one row and fingerprints computed the old way.
+        with connect(self.db_path) as connection:
+            import_messages(connection, collapsed, "Family", export_path)
+            connection.execute("UPDATE messages SET fingerprint = 'legacy-' || id")
+            connection.execute("PRAGMA user_version = 0")
+
+        with connect(self.db_path) as connection:
+            version = connection.execute("PRAGMA user_version").fetchone()[0]
+            recovered = import_messages(connection, messages, "Family", export_path)
+            again = import_messages(connection, messages, "Family", export_path)
+            stored = query_messages(connection)
+
+        self.assertEqual(len(collapsed), 3)
+        self.assertEqual(version, SCHEMA_VERSION)
+        self.assertEqual(recovered.inserted, 3)
+        self.assertEqual(again.inserted, 0)
+        self.assertEqual(
+            [message.text for message in stored],
+            ["<Media omitted>"] * 3 + ["ok"] * 2 + ["Done"],
+        )
 
     def test_connection_context_manager_closes_database(self) -> None:
         with connect(self.db_path) as connection:
