@@ -98,6 +98,10 @@ Bancos criados por versões anteriores ao esquema 1 descartavam essas mensagens 
 
 O esquema 2 acrescenta o índice de busca de texto. Ele também é criado automaticamente na primeira abertura, indexa as mensagens já importadas e não altera nenhuma delas.
 
+O esquema 3 acrescenta índices para comparar horários pelo instante, mesmo quando as mensagens têm fusos diferentes. Os timestamps originais, IDs, fingerprints e textos são preservados.
+
+A inicialização e as migrações são executadas em uma única transação. A versão é conferida antes de qualquer alteração e novamente depois de obter o bloqueio de escrita; um esquema mais novo que o código é recusado com uma mensagem para atualizar a aplicação. Uma falha na migração desfaz suas alterações. Isso não substitui encerrar processos antigos antes de atualizar: conexões já abertas continuam usando o código que as iniciou.
+
 Um client MCP também pode fazer a mesma importação chamando `import_conversation` com o caminho absoluto do `.txt`. O `chat_name` é opcional quando o servidor foi iniciado com `--chat`:
 
 ```text
@@ -191,7 +195,11 @@ O MCP expõe as seguintes ferramentas estruturadas:
 
 Cada parâmetro tem descrição no schema da ferramenta, incluindo os formatos de data aceitos. `get_messages` e `search_messages` devolvem as mensagens mais antigas primeiro; `order="desc"` traz as mais recentes. O resultado é limitado por `limit`, e `has_more` indica que outras mensagens também atendiam aos filtros.
 
-`search_messages` procura palavras inteiras, juntas e na ordem dada, ignorando acentos e maiúsculas: `reuniao` encontra "Reunião". A última palavra também casa com palavras mais longas, então `reuni` encontra "reuniões". Um trecho no meio de uma palavra não é encontrado: `deploy` acha "deployment", mas não "redeploy". Buscas só com emoji ou pontuação comparam o texto diretamente.
+Os filtros e a ordenação comparam instantes, inclusive ao consultar em um timezone diferente do usado na importação. As mensagens mantêm o timestamp com o fuso original; os campos `first_timestamp` e `last_timestamp` das listagens e contagens são apresentados em UTC. Os agrupamentos por `date` e `hour` continuam usando a data e a hora locais gravadas na importação.
+
+Falhas de validação das ferramentas MCP são sinalizadas com `isError: true`, incluindo datas inválidas, busca vazia e caminho de importação inválido.
+
+`search_messages` procura palavras inteiras, juntas e na ordem dada, ignorando acentos e maiúsculas: `reuniao` encontra "Reunião". A última palavra também casa com palavras mais longas, então `reuni` encontra "reuniões". Um trecho no meio de uma palavra não é encontrado: `deploy` acha "deployment", mas não "redeploy". Buscas só com emoji ou pontuação comparam o texto literalmente, incluindo `%` e `_`.
 
 O servidor também publica o recurso `whatsapp://chats` e o prompt `analyze_whatsapp_conversations` para clients que oferecem suporte a esses recursos MCP.
 
