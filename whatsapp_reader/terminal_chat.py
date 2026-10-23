@@ -68,7 +68,7 @@ class TerminalChatApp:
 
         while True:
             try:
-                user_input = self.prompt_session.prompt("voce > ").strip()
+                user_input = (await self.prompt_session.prompt_async("voce > ")).strip()
             except KeyboardInterrupt:
                 self.console.print("\n[dim]Use /exit para sair.[/]")
                 continue
