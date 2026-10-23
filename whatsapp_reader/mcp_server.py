@@ -386,6 +386,11 @@ def main(argv: list[str] | None = None) -> int:
 def _json_object(payload: str) -> dict[str, Any]:
     value = json.loads(payload)
     if isinstance(value, dict):
+        if "error" in value:
+            # FastMCP turns tool exceptions into CallToolResult(isError=True).
+            from mcp.server.fastmcp.exceptions import ToolError
+
+            raise ToolError(str(value["error"]))
         return value
     return {"result": value}
 
