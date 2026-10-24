@@ -1,4 +1,6 @@
-from __future__ import annotations
+# No `from __future__ import annotations`: the tool signatures in build_langchain_tools
+# use parameter types imported inside that function, and LangChain resolves string
+# annotations against module globals only.
 
 from datetime import date
 import os
@@ -81,26 +83,48 @@ def build_langchain_tools(toolbox: ConversationToolbox) -> list[Any]:
             '`python3 -m pip install -e ".[agent]"` inside the virtualenv.'
         ) from exc
 
+    from .tool_params import (
+        BucketLimit,
+        ChatName,
+        ContextAfter,
+        ContextBefore,
+        Date,
+        FromTime,
+        GroupBy,
+        MessageId,
+        MessageLimit,
+        MessageOrder,
+        Sender,
+        SenderLimit,
+        TextQuery,
+        ToTime,
+    )
+
     @tool
     def list_chats() -> str:
         """List imported WhatsApp chats with message counts and date ranges."""
         return toolbox.list_chats()
 
     @tool
-    def list_senders(chat_name: str | None = None, limit: int = 100) -> str:
-        """List senders in a chat. Use chat_name='*' to ignore the default chat scope."""
+    def list_senders(chat_name: ChatName = None, limit: SenderLimit = 100) -> str:
+        """List the senders of a chat with message counts, most active first."""
         return toolbox.list_senders(chat_name=chat_name, limit=limit)
 
     @tool
     def get_messages(
-        date: str | None = None,
-        from_time: str | None = None,
-        to_time: str | None = None,
-        sender: str | None = None,
-        chat_name: str | None = None,
-        limit: int = 50,
+        date: Date = None,
+        from_time: FromTime = None,
+        to_time: ToTime = None,
+        sender: Sender = None,
+        chat_name: ChatName = None,
+        limit: MessageLimit = 50,
+        order: MessageOrder = "asc",
     ) -> str:
-        """Fetch chronological messages by date, time range, sender, and chat."""
+        """Fetch messages by day, time range, sender, and chat.
+
+        Oldest first unless order='desc'. Check has_more before treating the result as
+        complete.
+        """
         return toolbox.get_messages(
             date=date,
             from_time=from_time,
@@ -108,19 +132,25 @@ def build_langchain_tools(toolbox: ConversationToolbox) -> list[Any]:
             sender=sender,
             chat_name=chat_name,
             limit=limit,
+            order=order,
         )
 
     @tool
     def search_messages(
-        text_query: str,
-        date: str | None = None,
-        from_time: str | None = None,
-        to_time: str | None = None,
-        sender: str | None = None,
-        chat_name: str | None = None,
-        limit: int = 50,
+        text_query: TextQuery,
+        date: Date = None,
+        from_time: FromTime = None,
+        to_time: ToTime = None,
+        sender: Sender = None,
+        chat_name: ChatName = None,
+        limit: MessageLimit = 50,
+        order: MessageOrder = "asc",
     ) -> str:
-        """Search message text with optional date, time range, sender, and chat filters."""
+        """Search message text, optionally filtered by day, time range, sender, and chat.
+
+        Oldest first unless order='desc'. Check has_more before treating the result as
+        complete.
+        """
         return toolbox.search_messages(
             text_query=text_query,
             date=date,
@@ -129,19 +159,20 @@ def build_langchain_tools(toolbox: ConversationToolbox) -> list[Any]:
             sender=sender,
             chat_name=chat_name,
             limit=limit,
+            order=order,
         )
 
     @tool
     def count_messages(
-        group_by: str = "sender",
-        date: str | None = None,
-        from_time: str | None = None,
-        to_time: str | None = None,
-        sender: str | None = None,
-        chat_name: str | None = None,
-        limit: int = 100,
+        group_by: GroupBy = "sender",
+        date: Date = None,
+        from_time: FromTime = None,
+        to_time: ToTime = None,
+        sender: Sender = None,
+        chat_name: ChatName = None,
+        limit: BucketLimit = 100,
     ) -> str:
-        """Count messages grouped by chat, sender, date, hour, or message_type."""
+        """Count messages per chat, sender, day, hour, or message type."""
         return toolbox.count_messages(
             group_by=group_by,
             date=date,
@@ -153,8 +184,12 @@ def build_langchain_tools(toolbox: ConversationToolbox) -> list[Any]:
         )
 
     @tool
-    def get_context_around(message_id: int, before: int = 10, after: int = 10) -> str:
-        """Fetch neighboring messages in the same chat around a specific message id."""
+    def get_context_around(
+        message_id: MessageId,
+        before: ContextBefore = 10,
+        after: ContextAfter = 10,
+    ) -> str:
+        """Fetch the messages around a message, in the same chat and in order."""
         return toolbox.get_context_around(message_id=message_id, before=before, after=after)
 
     return [
@@ -179,6 +214,9 @@ def _build_system_prompt(*, timezone: str, default_chat: str | None) -> str:
 Use the structured SQLite tools before making claims about messages, people, dates, counts,
 or timelines. Do not invent message contents. Prefer exact timestamps, sender names, and
 message ids as evidence when answering.
+
+Message results are capped by limit and come oldest first. Use order='desc' for the most
+recent messages, and when a result has has_more=true, fetch more before concluding.
 
 The conversation export timestamps use timezone {timezone}. Today's date is {date.today().isoformat()}.
 {chat_scope}

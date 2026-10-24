@@ -2,10 +2,23 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from itertools import groupby
 from pathlib import Path
 import sqlite3
+from types import TracebackType
 
-from .importer import ParsedMessage
+from .importer import ParsedMessage, message_fingerprints
+
+
+# Stored in PRAGMA user_version.
+# 1: fingerprints include the chat and the occurrence of identical messages.
+# 2: messages_fts, a full-text index of message text that ignores case and accents.
+# 3: indexes for ordering and filtering by instant instead of local timestamp text.
+SCHEMA_VERSION = 3
+
+# strftime('%s') supports SQLite versions predating unixepoch(). Stored messages have
+# whole-second precision; numeric bounds retain fractional seconds supplied by callers.
+_TIME_SQL = "CAST(strftime('%s', timestamp) AS INTEGER)"
 
 
 @dataclass(frozen=True)
@@ -28,14 +41,48 @@ class ImportResult:
     skipped: int
 
 
-def connect(db_path: str | Path) -> sqlite3.Connection:
-    connection = sqlite3.connect(str(db_path))
+class ManagedConnection(sqlite3.Connection):
+    """SQLite connection whose outermost context commits or rolls back, then closes."""
+
+    def __enter__(self) -> ManagedConnection:
+        super().__enter__()
+        self._context_depth = getattr(self, "_context_depth", 0) + 1
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> bool | None:
+        self._context_depth = max(getattr(self, "_context_depth", 1) - 1, 0)
+        if self._context_depth:
+            # Helpers may enter again; successful nested contexts must not commit.
+            if exc_type is not None:
+                self.rollback()
+            return None
+        try:
+            return super().__exit__(exc_type, exc_value, traceback)
+        finally:
+            self.close()
+
+
+def connect(db_path: str | Path) -> ManagedConnection:
+    connection = sqlite3.connect(str(db_path), factory=ManagedConnection)
     connection.row_factory = sqlite3.Row
-    initialize_schema(connection)
+    try:
+        initialize_schema(connection)
+    except BaseException:
+        connection.close()
+        raise
     return connection
 
 
 def initialize_schema(connection: sqlite3.Connection) -> None:
+    _migrate_schema(connection)
+
+
+def _create_base_schema(connection: sqlite3.Connection) -> None:
     connection.execute(
         """
         CREATE TABLE IF NOT EXISTS messages (
@@ -57,7 +104,139 @@ def initialize_schema(connection: sqlite3.Connection) -> None:
     connection.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_fingerprint ON messages(fingerprint)"
     )
-    connection.commit()
+
+
+def _migrate_schema(connection: sqlite3.Connection) -> None:
+    _check_schema_version(_schema_version(connection))
+
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        # Even an apparently current database may be undergoing an upgrade. Wait for
+        # its writer, then validate again before touching any schema or version marker.
+        version = _schema_version(connection)
+        _check_schema_version(version)
+        if version == SCHEMA_VERSION:
+            connection.commit()
+            return
+
+        _create_base_schema(connection)
+        if version < 1:
+            _rebuild_fingerprints(connection)
+        if version < 2:
+            _create_text_index(connection)
+        if version < 3:
+            _create_time_indexes(connection)
+        connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+        connection.commit()
+    except BaseException:
+        connection.rollback()
+        raise
+
+
+def _check_schema_version(version: int) -> None:
+    if version > SCHEMA_VERSION:
+        raise RuntimeError(
+            f"Database schema {version} is newer than supported schema {SCHEMA_VERSION}. "
+            "Upgrade WhatsApp Reader before opening this database."
+        )
+
+
+def _schema_version(connection: sqlite3.Connection) -> int:
+    return connection.execute("PRAGMA user_version").fetchone()[0]
+
+
+def _rebuild_fingerprints(connection: sqlite3.Connection) -> None:
+    """Recompute fingerprints written before version 1.
+
+    Older fingerprints ignored the chat and collapsed identical messages sent in the
+    same minute. Rows are renumbered in insertion order, so reimporting the original
+    export afterwards inserts only the messages that were collapsed.
+    """
+    rows = connection.execute(
+        """
+        SELECT id, chat_name, timestamp, sender, text, message_type
+        FROM messages
+        ORDER BY chat_name ASC, timestamp ASC, id ASC
+        """
+    ).fetchall()
+    for chat_name, chat_rows in groupby(rows, key=lambda row: row[1]):
+        chat_rows = list(chat_rows)
+        messages = [
+            ParsedMessage(
+                timestamp=datetime.fromisoformat(timestamp),
+                sender=sender,
+                text=text,
+                message_type=message_type,
+            )
+            for _id, _chat, timestamp, sender, text, message_type in chat_rows
+        ]
+        connection.executemany(
+            "UPDATE messages SET fingerprint = ? WHERE id = ?",
+            zip(message_fingerprints(messages, chat_name), (row[0] for row in chat_rows)),
+        )
+
+
+def _create_text_index(connection: sqlite3.Connection) -> None:
+    """Create the full-text index of message text and index the existing rows.
+
+    The unicode61 tokenizer with remove_diacritics folds case and accents, so
+    "reuniao" finds "Reunião". The index keeps no copy of the text: it reads it from
+    messages, and triggers keep it in sync with inserts, updates and deletes.
+    """
+    try:
+        connection.execute(
+            """
+            CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+                text,
+                content='messages',
+                content_rowid='id',
+                tokenize='unicode61 remove_diacritics 2'
+            )
+            """
+        )
+    except sqlite3.OperationalError as exc:
+        if "fts5" not in str(exc):
+            raise
+        raise RuntimeError(
+            "This Python's SQLite has no FTS5, which text search needs. "
+            "Use a Python build whose sqlite3 module includes FTS5."
+        ) from exc
+
+    connection.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS messages_fts_insert AFTER INSERT ON messages BEGIN
+            INSERT INTO messages_fts(rowid, text) VALUES (new.id, new.text);
+        END
+        """
+    )
+    connection.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS messages_fts_delete AFTER DELETE ON messages BEGIN
+            INSERT INTO messages_fts(messages_fts, rowid, text)
+            VALUES ('delete', old.id, old.text);
+        END
+        """
+    )
+    connection.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS messages_fts_update AFTER UPDATE OF text ON messages BEGIN
+            INSERT INTO messages_fts(messages_fts, rowid, text)
+            VALUES ('delete', old.id, old.text);
+            INSERT INTO messages_fts(rowid, text) VALUES (new.id, new.text);
+        END
+        """
+    )
+    connection.execute("INSERT INTO messages_fts(messages_fts) VALUES ('rebuild')")
+
+
+def _create_time_indexes(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        f"CREATE INDEX IF NOT EXISTS idx_messages_instant ON messages({_TIME_SQL}, id)"
+    )
+    connection.execute(
+        f"CREATE INDEX IF NOT EXISTS idx_messages_chat_instant "
+        f"ON messages(chat_name, {_TIME_SQL}, id)"
+    )
 
 
 def import_messages(
@@ -71,7 +250,7 @@ def import_messages(
     inserted = 0
 
     with connection:
-        for message in messages:
+        for message, fingerprint in zip(messages, message_fingerprints(messages, chat_name)):
             cursor = connection.execute(
                 """
                 INSERT OR IGNORE INTO messages (
@@ -93,7 +272,7 @@ def import_messages(
                     message.text,
                     message.message_type,
                     source_path,
-                    message.fingerprint,
+                    fingerprint,
                     created_at,
                 ),
             )
@@ -111,28 +290,24 @@ def query_messages(
     from_timestamp: datetime | None = None,
     to_timestamp: datetime | None = None,
     limit: int | None = None,
+    order: str = "asc",
 ) -> list[StoredMessage]:
     sql = "SELECT * FROM messages"
     conditions: list[str] = []
-    params: list[str | int] = []
-
-    if chat_name is not None:
-        conditions.append("chat_name = ?")
-        params.append(chat_name)
-    if sender is not None:
-        conditions.append("sender = ?")
-        params.append(sender)
-    if from_timestamp is not None:
-        conditions.append("timestamp >= ?")
-        params.append(from_timestamp.isoformat(timespec="seconds"))
-    if to_timestamp is not None:
-        conditions.append("timestamp <= ?")
-        params.append(to_timestamp.isoformat(timespec="seconds"))
+    params: list[object] = []
+    _append_common_filters(
+        conditions,
+        params,
+        chat_name=chat_name,
+        sender=sender,
+        from_timestamp=from_timestamp,
+        to_timestamp=to_timestamp,
+    )
 
     if conditions:
         sql += " WHERE " + " AND ".join(conditions)
 
-    sql += " ORDER BY timestamp ASC, id ASC"
+    sql += _order_by_time(order)
     if limit is not None:
         sql += " LIMIT ?"
         params.append(limit)
@@ -150,10 +325,20 @@ def search_messages(
     from_timestamp: datetime | None = None,
     to_timestamp: datetime | None = None,
     limit: int | None = None,
+    order: str = "asc",
 ) -> list[StoredMessage]:
     sql = "SELECT * FROM messages"
-    conditions: list[str] = ["text LIKE ?"]
-    params: list[object] = [f"%{text_query}%"]
+    conditions: list[str]
+    params: list[object]
+    if any(character.isalnum() for character in text_query):
+        # Adjacent words in this order, ignoring case and accents. The trailing * lets
+        # the last word match longer words too ("reuni" finds "reuniões").
+        conditions = ["id IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?)"]
+        params = ['"' + text_query.replace('"', '""') + '"*']
+    else:
+        # Only emoji or punctuation: the index has no words for these, so scan the text.
+        conditions = ["instr(text, ?) > 0"]
+        params = [text_query]
 
     _append_common_filters(
         conditions,
@@ -165,7 +350,7 @@ def search_messages(
     )
 
     sql += " WHERE " + " AND ".join(conditions)
-    sql += " ORDER BY timestamp ASC, id ASC"
+    sql += _order_by_time(order)
     if limit is not None:
         sql += " LIMIT ?"
         params.append(limit)
@@ -180,8 +365,8 @@ def list_chats(connection: sqlite3.Connection) -> list[dict[str, object]]:
         SELECT
             chat_name,
             COUNT(*) AS message_count,
-            MIN(timestamp) AS first_timestamp,
-            MAX(timestamp) AS last_timestamp
+            MIN(strftime('%Y-%m-%dT%H:%M:%S+00:00', timestamp)) AS first_timestamp,
+            MAX(strftime('%Y-%m-%dT%H:%M:%S+00:00', timestamp)) AS last_timestamp
         FROM messages
         GROUP BY chat_name
         ORDER BY message_count DESC, chat_name ASC
@@ -200,8 +385,8 @@ def list_senders(
         SELECT
             sender,
             COUNT(*) AS message_count,
-            MIN(timestamp) AS first_timestamp,
-            MAX(timestamp) AS last_timestamp
+            MIN(strftime('%Y-%m-%dT%H:%M:%S+00:00', timestamp)) AS first_timestamp,
+            MAX(strftime('%Y-%m-%dT%H:%M:%S+00:00', timestamp)) AS last_timestamp
         FROM messages
         WHERE sender IS NOT NULL
     """
@@ -245,8 +430,8 @@ def count_messages(
         SELECT
             {expression} AS bucket,
             COUNT(*) AS message_count,
-            MIN(timestamp) AS first_timestamp,
-            MAX(timestamp) AS last_timestamp
+            MIN(strftime('%Y-%m-%dT%H:%M:%S+00:00', timestamp)) AS first_timestamp,
+            MAX(strftime('%Y-%m-%dT%H:%M:%S+00:00', timestamp)) AS last_timestamp
         FROM messages
     """
     conditions: list[str] = []
@@ -282,27 +467,37 @@ def get_message_window(
     if target is None:
         return []
 
+    # The explicit time bound lets SQLite seek the expression index before the id tie-breaker.
+    target_instant = datetime.fromisoformat(target["timestamp"]).timestamp()
     before_rows = connection.execute(
-        """
+        f"""
         SELECT * FROM messages
-        WHERE chat_name = ? AND (timestamp < ? OR (timestamp = ? AND id < ?))
-        ORDER BY timestamp DESC, id DESC
+        WHERE chat_name = ? AND {_TIME_SQL} <= ? AND ({_TIME_SQL}, id) < (?, ?)
+        ORDER BY {_TIME_SQL} DESC, id DESC
         LIMIT ?
         """,
-        (target["chat_name"], target["timestamp"], target["timestamp"], message_id, before),
+        (target["chat_name"], target_instant, target_instant, message_id, before),
     ).fetchall()
     after_rows = connection.execute(
-        """
+        f"""
         SELECT * FROM messages
-        WHERE chat_name = ? AND (timestamp > ? OR (timestamp = ? AND id > ?))
-        ORDER BY timestamp ASC, id ASC
+        WHERE chat_name = ? AND {_TIME_SQL} >= ? AND ({_TIME_SQL}, id) > (?, ?)
+        ORDER BY {_TIME_SQL} ASC, id ASC
         LIMIT ?
         """,
-        (target["chat_name"], target["timestamp"], target["timestamp"], message_id, after),
+        (target["chat_name"], target_instant, target_instant, message_id, after),
     ).fetchall()
 
     rows = list(reversed(before_rows)) + [target] + list(after_rows)
     return [_stored_message_from_row(row) for row in rows]
+
+
+def _order_by_time(order: str) -> str:
+    directions = {"asc": "ASC", "desc": "DESC"}
+    if order not in directions:
+        raise ValueError(f"unsupported order {order!r}; use 'asc' or 'desc'")
+    direction = directions[order]
+    return f" ORDER BY {_TIME_SQL} {direction}, id {direction}"
 
 
 def _append_common_filters(
@@ -321,11 +516,11 @@ def _append_common_filters(
         conditions.append("sender = ?")
         params.append(sender)
     if from_timestamp is not None:
-        conditions.append("timestamp >= ?")
-        params.append(from_timestamp.isoformat(timespec="seconds"))
+        conditions.append(f"{_TIME_SQL} >= ?")
+        params.append(from_timestamp.timestamp())
     if to_timestamp is not None:
-        conditions.append("timestamp <= ?")
-        params.append(to_timestamp.isoformat(timespec="seconds"))
+        conditions.append(f"{_TIME_SQL} <= ?")
+        params.append(to_timestamp.timestamp())
 
 
 def _stored_message_from_row(row: sqlite3.Row) -> StoredMessage:

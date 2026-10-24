@@ -1,29 +1,32 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import redirect_stdout
 import importlib.util
+from io import StringIO
 import json
+import logging
 import os
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from whatsapp_reader.cli import format_messages_as_json
+from whatsapp_reader.cli import format_messages_as_json, main as cli_main
 from whatsapp_reader.config import (
     load_env_file,
     resolve_chat_history_file,
     resolve_chat_memory_db,
     resolve_chat_session,
     resolve_db_path,
-    resolve_mcp_host,
-    resolve_mcp_port,
     resolve_mcp_url,
     resolve_timezone,
     resolve_tools_backend,
 )
 from whatsapp_reader.conversation_tools import ConversationToolbox
 from whatsapp_reader.db import (
+    SCHEMA_VERSION,
     connect,
     count_messages,
     get_message_window,
@@ -33,15 +36,18 @@ from whatsapp_reader.db import (
     query_messages,
     search_messages,
 )
-from whatsapp_reader.importer import parse_export
+from whatsapp_reader.importer import message_fingerprints, parse_export
 from whatsapp_reader.mcp_server import (
     MCPServerConfig,
     build_mcp_stdio_connection,
+    create_mcp_http_app,
     create_mcp_server,
 )
 from whatsapp_reader.terminal_chat import (
     _content_to_text,
+    _mcp_connection,
     _normalize_stream_event,
+    _open_tool_backend,
     _select_chat_from_choice,
     _status_toolbar,
     _summarize_tool_payload,
@@ -60,6 +66,20 @@ SAMPLE_EXPORT = """1/2/24, 08:00 - Alice: First message
 1/3/24, 09:00 - Carol: Next day
 """
 
+DUPLICATES_EXPORT = """1/2/24, 08:00 - Alice: <Media omitted>
+1/2/24, 08:00 - Alice: <Media omitted>
+1/2/24, 08:00 - Alice: <Media omitted>
+1/2/24, 08:01 - Bob: ok
+1/2/24, 08:01 - Bob: ok
+1/2/24, 08:02 - Bob: Done
+"""
+
+SEARCH_EXPORT = """1/2/24, 08:00 - Alice: Reunião amanhã às 10h
+1/2/24, 08:01 - Bob: REUNIAO cancelada
+1/2/24, 08:02 - Alice: As reuniões da semana
+1/2/24, 08:03 - Bob: kkkk 😂
+"""
+
 
 class WhatsAppReaderTest(unittest.TestCase):
     def setUp(self) -> None:
@@ -69,6 +89,11 @@ class WhatsAppReaderTest(unittest.TestCase):
         self.export_path = self.root / "chat.txt"
         self.export_path.write_text(SAMPLE_EXPORT, encoding="utf-8")
         self.db_path = self.root / "messages.sqlite3"
+
+    def _write_export(self, name: str, content: str) -> Path:
+        path = self.root / name
+        path.write_text(content, encoding="utf-8")
+        return path
 
     def test_parse_simple_multiline_system_and_same_minute_messages(self) -> None:
         messages = parse_export(self.export_path)
@@ -81,7 +106,17 @@ class WhatsAppReaderTest(unittest.TestCase):
         self.assertEqual(messages[2].message_type, "system")
         self.assertEqual(messages[2].text, "Alice pinned a message")
         self.assertEqual(messages[3].timestamp, messages[4].timestamp)
-        self.assertNotEqual(messages[3].fingerprint, messages[4].fingerprint)
+        fingerprints = message_fingerprints(messages, "Family")
+        self.assertNotEqual(fingerprints[3], fingerprints[4])
+
+    def test_fingerprints_number_identical_messages_and_depend_on_chat(self) -> None:
+        messages = parse_export(self._write_export("duplicates.txt", DUPLICATES_EXPORT))
+        family = message_fingerprints(messages, "Family")
+
+        self.assertEqual(messages[0], messages[1])
+        self.assertEqual(len(set(family)), len(messages))
+        self.assertEqual(family, message_fingerprints(messages, "Family"))
+        self.assertTrue(set(family).isdisjoint(message_fingerprints(messages, "Work")))
 
     def test_reimport_skips_existing_messages(self) -> None:
         messages = parse_export(self.export_path)
@@ -97,6 +132,107 @@ class WhatsAppReaderTest(unittest.TestCase):
         self.assertEqual(second.inserted, 0)
         self.assertEqual(second.skipped, 6)
         self.assertEqual(len(stored), 6)
+
+    def test_identical_messages_in_same_minute_are_all_kept(self) -> None:
+        export_path = self._write_export("duplicates.txt", DUPLICATES_EXPORT)
+        messages = parse_export(export_path)
+        with connect(self.db_path) as connection:
+            first = import_messages(connection, messages, "Family", export_path)
+            second = import_messages(connection, messages, "Family", export_path)
+            stored = query_messages(connection)
+
+        self.assertEqual((first.parsed, first.inserted, first.skipped), (6, 6, 0))
+        self.assertEqual((second.parsed, second.inserted, second.skipped), (6, 0, 6))
+        self.assertEqual(
+            [message.text for message in stored],
+            ["<Media omitted>"] * 3 + ["ok"] * 2 + ["Done"],
+        )
+
+    def test_same_export_imports_into_each_chat(self) -> None:
+        messages = parse_export(self.export_path)
+        with connect(self.db_path) as connection:
+            family = import_messages(connection, messages, "Family", self.export_path)
+            work = import_messages(connection, messages, "Work", self.export_path)
+            chats = list_chats(connection)
+
+        self.assertEqual(family.inserted, 6)
+        self.assertEqual(work.inserted, 6)
+        self.assertEqual(
+            {chat["chat_name"]: chat["message_count"] for chat in chats},
+            {"Family": 6, "Work": 6},
+        )
+
+    def test_migration_lets_reimport_recover_collapsed_messages(self) -> None:
+        export_path = self._write_export("duplicates.txt", DUPLICATES_EXPORT)
+        messages = parse_export(export_path)
+        collapsed = list(dict.fromkeys(messages))
+
+        # Simulate a database written before schema version 1: identical messages
+        # collapsed into one row and fingerprints computed the old way.
+        with connect(self.db_path) as connection:
+            import_messages(connection, collapsed, "Family", export_path)
+            connection.execute("UPDATE messages SET fingerprint = 'legacy-' || id")
+            connection.execute("PRAGMA user_version = 0")
+
+        with connect(self.db_path) as connection:
+            version = connection.execute("PRAGMA user_version").fetchone()[0]
+            recovered = import_messages(connection, messages, "Family", export_path)
+            again = import_messages(connection, messages, "Family", export_path)
+            stored = query_messages(connection)
+
+        self.assertEqual(len(collapsed), 3)
+        self.assertEqual(version, SCHEMA_VERSION)
+        self.assertEqual(recovered.inserted, 3)
+        self.assertEqual(again.inserted, 0)
+        self.assertEqual(
+            [message.text for message in stored],
+            ["<Media omitted>"] * 3 + ["ok"] * 2 + ["Done"],
+        )
+
+    def test_search_ignores_case_and_accents(self) -> None:
+        export_path = self._write_export("search.txt", SEARCH_EXPORT)
+        with connect(self.db_path) as connection:
+            import_messages(connection, parse_export(export_path), "Family", export_path)
+
+            def texts(query: str) -> list[str]:
+                return [message.text for message in search_messages(connection, text_query=query)]
+
+            self.assertEqual(texts("reuniao"), ["Reunião amanhã às 10h", "REUNIAO cancelada"])
+            self.assertEqual(len(texts("REUNI")), 3)
+            self.assertEqual(texts("amanha as 10H"), ["Reunião amanhã às 10h"])
+            self.assertEqual(texts("😂"), ["kkkk 😂"])
+            # Quotes and FTS5 operators in the query are plain text, not query syntax.
+            self.assertEqual(texts('reuniao" OR "kkkk'), [])
+
+    def test_migration_indexes_messages_imported_before_text_search(self) -> None:
+        export_path = self._write_export("search.txt", SEARCH_EXPORT)
+        # Simulate a database at schema version 1, before the full-text index existed.
+        with connect(self.db_path) as connection:
+            import_messages(connection, parse_export(export_path), "Family", export_path)
+            for trigger in ("insert", "delete", "update"):
+                connection.execute(f"DROP TRIGGER messages_fts_{trigger}")
+            connection.execute("DROP TABLE messages_fts")
+            connection.execute("PRAGMA user_version = 1")
+
+        with connect(self.db_path) as connection:
+            version = connection.execute("PRAGMA user_version").fetchone()[0]
+            existing = search_messages(connection, text_query="reuniao")
+            import_messages(connection, parse_export(self.export_path), "Family", self.export_path)
+            imported_later = search_messages(connection, text_query="same minute")
+
+        self.assertEqual(version, SCHEMA_VERSION)
+        self.assertEqual(len(existing), 2)
+        self.assertEqual(
+            [message.text for message in imported_later],
+            ["Same minute one", "Same minute two"],
+        )
+
+    def test_connection_context_manager_closes_database(self) -> None:
+        with connect(self.db_path) as connection:
+            self.assertEqual(query_messages(connection), [])
+
+        with self.assertRaises(sqlite3.ProgrammingError):
+            connection.execute("SELECT 1")
 
     def test_query_by_date_sender_interval_and_combined_filters(self) -> None:
         messages = parse_export(self.export_path)
@@ -188,6 +324,92 @@ class WhatsAppReaderTest(unittest.TestCase):
         self.assertEqual(count_payload["rows"][0]["bucket"], "2024-01-02")
         self.assertEqual(count_payload["rows"][0]["message_count"], 5)
 
+    def test_message_queries_report_has_more_and_support_desc_order(self) -> None:
+        toolbox = ConversationToolbox(self.db_path, default_chat="Family")
+        toolbox.import_conversation(str(self.export_path))
+
+        oldest = json.loads(toolbox.get_messages(limit=2))
+        latest = json.loads(toolbox.get_messages(limit=2, order="desc"))
+        everything = json.loads(toolbox.get_messages(limit=6))
+        search = json.loads(toolbox.search_messages("Same minute", limit=1, order="desc"))
+        invalid = json.loads(toolbox.get_messages(order="newest"))
+
+        self.assertEqual(
+            [m["text"] for m in oldest["messages"]],
+            ["First message", "List:\n- item one\n- item two"],
+        )
+        self.assertTrue(oldest["has_more"])
+        self.assertEqual([m["text"] for m in latest["messages"]], ["Next day", "Same minute two"])
+        self.assertEqual((everything["count"], everything["has_more"]), (6, False))
+        self.assertEqual(search["messages"][0]["text"], "Same minute two")
+        self.assertTrue(search["has_more"])
+        self.assertIn("order", invalid["error"])
+
+    def test_time_filters_accept_iso_with_offset_and_require_a_time(self) -> None:
+        toolbox = ConversationToolbox(self.db_path, default_chat="Family")
+        toolbox.import_conversation(str(self.export_path))
+
+        utc = json.loads(
+            toolbox.get_messages(from_time="2024-01-02T11:03:00Z", to_time="2024-01-02T08:03:00-03:00")
+        )
+        local = json.loads(
+            toolbox.get_messages(from_time="2024-01-02 08:03", to_time="2024-01-02T08:03")
+        )
+        time_only = json.loads(toolbox.get_messages(from_time="08:03"))
+        date_only = json.loads(toolbox.get_messages(to_time="2024-01-02"))
+        bad_date = json.loads(toolbox.get_messages(date="02/01/2024"))
+
+        self.assertEqual([m["text"] for m in utc["messages"]], ["Same minute one", "Same minute two"])
+        self.assertEqual(local["messages"], utc["messages"])
+        self.assertIn("expected YYYY-MM-DD HH:MM", time_only["error"])
+        self.assertIn("expected YYYY-MM-DD HH:MM", date_only["error"])
+        self.assertEqual(bad_date["error"], "invalid date '02/01/2024'; expected YYYY-MM-DD")
+
+    def test_conversation_toolbox_imports_export_idempotently(self) -> None:
+        toolbox = ConversationToolbox(self.db_path, default_chat="Family")
+
+        first = json.loads(toolbox.import_conversation(str(self.export_path)))
+        second = json.loads(toolbox.import_conversation(str(self.export_path)))
+
+        self.assertEqual(first["chat_name"], "Family")
+        self.assertEqual(first["parsed"], 6)
+        self.assertEqual(first["inserted"], 6)
+        self.assertEqual(first["skipped"], 0)
+        self.assertEqual(second["inserted"], 0)
+        self.assertEqual(second["skipped"], 6)
+
+    def test_conversation_toolbox_import_validates_input(self) -> None:
+        toolbox = ConversationToolbox(self.db_path)
+
+        relative = json.loads(toolbox.import_conversation("chat.txt", "Family"))
+        wrong_extension = json.loads(
+            toolbox.import_conversation(str(self.root / "chat.json"), "Family")
+        )
+        missing_chat = json.loads(toolbox.import_conversation(str(self.export_path)))
+
+        self.assertIn("absolute path", relative["error"])
+        self.assertIn(".txt", wrong_extension["error"])
+        self.assertIn("chat_name", missing_chat["error"])
+
+    def test_cli_import_remains_available(self) -> None:
+        output = StringIO()
+        with redirect_stdout(output):
+            exit_code = cli_main(
+                [
+                    "import",
+                    str(self.export_path),
+                    "--chat",
+                    "Family",
+                    "--db",
+                    str(self.db_path),
+                ]
+            )
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("parsed=6 inserted=6 skipped=0", output.getvalue())
+        with connect(self.db_path) as connection:
+            self.assertEqual(len(query_messages(connection, chat_name="Family")), 6)
+
     def test_env_file_loading_does_not_override_existing_values(self) -> None:
         env_path = self.root / ".env"
         env_path.write_text(
@@ -209,9 +431,7 @@ class WhatsAppReaderTest(unittest.TestCase):
             "WHATSAPP_READER_MEMORY_DB=.memory.sqlite3\n"
             "WHATSAPP_READER_HISTORY_FILE=.history\n"
             "WHATSAPP_READER_TOOLS_BACKEND=direct\n"
-            "WHATSAPP_READER_MCP_URL=http://127.0.0.1:9999/mcp\n"
-            "WHATSAPP_READER_MCP_HOST=0.0.0.0\n"
-            "WHATSAPP_READER_MCP_PORT=9999\n",
+            "WHATSAPP_READER_MCP_URL=http://127.0.0.1:9999/mcp\n",
             encoding="utf-8",
         )
 
@@ -223,8 +443,6 @@ class WhatsAppReaderTest(unittest.TestCase):
             self.assertEqual(resolve_chat_history_file(), ".history")
             self.assertEqual(resolve_tools_backend(), "direct")
             self.assertEqual(resolve_mcp_url(), "http://127.0.0.1:9999/mcp")
-            self.assertEqual(resolve_mcp_host(), "0.0.0.0")
-            self.assertEqual(resolve_mcp_port(), 9999)
 
     def test_mcp_stdio_connection_builder(self) -> None:
         connection = build_mcp_stdio_connection(
@@ -248,7 +466,7 @@ class WhatsAppReaderTest(unittest.TestCase):
         with connect(self.db_path) as connection:
             import_messages(connection, messages, "Family", self.export_path)
 
-        async def run() -> tuple[list[str], dict[str, object]]:
+        async def run() -> tuple[list[str], dict[str, object], dict[str, object]]:
             server = create_mcp_server(
                 MCPServerConfig(
                     db_path=self.db_path,
@@ -258,14 +476,148 @@ class WhatsAppReaderTest(unittest.TestCase):
             )
             tools = await server.list_tools()
             _content, structured = await server.call_tool("list_chats", {})
-            return [tool.name for tool in tools], structured
+            _import_content, import_payload = await server.call_tool(
+                "import_conversation",
+                {"file_path": str(self.export_path)},
+            )
+            return [tool.name for tool in tools], structured, import_payload
 
-        tool_names, payload = asyncio.run(run())
+        tool_names, payload, import_payload = asyncio.run(run())
 
+        self.assertIn("import_conversation", tool_names)
         self.assertIn("list_chats", tool_names)
         self.assertIn("search_messages", tool_names)
         self.assertEqual(payload["count"], 1)
         self.assertEqual(payload["chats"][0]["chat_name"], "Family")
+        self.assertEqual(import_payload["inserted"], 0)
+        self.assertEqual(import_payload["skipped"], 6)
+
+    @unittest.skipUnless(importlib.util.find_spec("mcp"), "MCP dependencies are missing")
+    def test_mcp_tool_schemas_describe_every_parameter(self) -> None:
+        server = create_mcp_server(
+            MCPServerConfig(db_path=self.db_path, timezone="America/Sao_Paulo")
+        )
+        tools = {tool.name: tool.inputSchema["properties"] for tool in asyncio.run(server.list_tools())}
+
+        undescribed = [
+            (tool_name, parameter)
+            for tool_name, parameters in tools.items()
+            for parameter, schema in parameters.items()
+            if not schema.get("description")
+        ]
+        self.assertEqual(undescribed, [])
+        self.assertEqual(tools["get_messages"]["order"]["enum"], ["asc", "desc"])
+        self.assertEqual(tools["search_messages"]["order"]["enum"], ["asc", "desc"])
+        self.assertEqual(
+            tools["count_messages"]["group_by"]["enum"],
+            ["chat", "sender", "date", "hour", "message_type"],
+        )
+
+    @unittest.skipUnless(importlib.util.find_spec("langchain"), "Agent dependencies are missing")
+    def test_agent_tools_share_the_described_parameters(self) -> None:
+        from whatsapp_reader.agent import build_langchain_tools
+
+        tools = {tool.name: tool.args for tool in build_langchain_tools(ConversationToolbox(self.db_path))}
+
+        undescribed = [
+            (tool_name, parameter)
+            for tool_name, parameters in tools.items()
+            for parameter, schema in parameters.items()
+            if not schema.get("description")
+        ]
+        self.assertEqual(undescribed, [])
+        self.assertEqual(tools["get_messages"]["order"]["enum"], ["asc", "desc"])
+
+    @unittest.skipUnless(importlib.util.find_spec("mcp"), "MCP dependencies are missing")
+    def test_mcp_http_endpoint_only_accepts_post(self) -> None:
+        from starlette.testclient import TestClient
+
+        # Keep the test client's per-request INFO lines out of the test output.
+        logging.disable(logging.INFO)
+        self.addCleanup(logging.disable, logging.NOTSET)
+        app = create_mcp_http_app(
+            MCPServerConfig(db_path=self.db_path, timezone="America/Sao_Paulo", transport="http")
+        )
+        list_tools = {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}
+
+        # The SDK only accepts Host headers of the 127.0.0.1 server it was configured for.
+        with TestClient(app, base_url="http://127.0.0.1:8765") as client:
+            sse_get = client.get("/mcp", headers={"Accept": "text/event-stream"})
+            delete = client.delete("/mcp")
+            tools = client.post(
+                "/mcp",
+                headers={"Accept": "application/json, text/event-stream"},
+                json=list_tools,
+            )
+            discovery = client.get("/.well-known/oauth-protected-resource")
+
+        self.assertEqual(sse_get.status_code, 405)
+        self.assertEqual(sse_get.headers["allow"], "POST")
+        self.assertEqual(delete.status_code, 405)
+        self.assertEqual(tools.status_code, 200)
+        self.assertIn("list_chats", [tool["name"] for tool in tools.json()["result"]["tools"]])
+        self.assertEqual(discovery.status_code, 404)
+
+    @unittest.skipUnless(importlib.util.find_spec("mcp"), "MCP dependencies are missing")
+    def test_mcp_sdk_logs_stay_at_warning_unless_debugging(self) -> None:
+        sdk_logger = logging.getLogger("mcp")
+        self.addCleanup(sdk_logger.setLevel, sdk_logger.level)
+        logging.disable(logging.DEBUG)
+        self.addCleanup(logging.disable, logging.NOTSET)
+
+        levels = {}
+        for level in ("INFO", "DEBUG", "ERROR"):
+            create_mcp_server(
+                MCPServerConfig(db_path=self.db_path, timezone="America/Sao_Paulo", log_level=level)
+            )
+            levels[level] = sdk_logger.level
+
+        self.assertEqual(
+            levels,
+            {"INFO": logging.WARNING, "DEBUG": logging.DEBUG, "ERROR": logging.ERROR},
+        )
+
+    def test_terminal_chat_uses_stdio_unless_mcp_url_is_set(self) -> None:
+        config = TerminalChatConfig(
+            db_path=str(self.db_path),
+            timezone="America/Sao_Paulo",
+            model="openai:gpt-5.6-terra",
+            chat_name="Family",
+        )
+        stdio = _mcp_connection(config)
+        config.mcp_url = "http://127.0.0.1:8765/mcp"
+        http = _mcp_connection(config)
+
+        self.assertEqual(stdio["transport"], "stdio")
+        self.assertIn(str(self.db_path), stdio["args"])
+        self.assertIn("Family", stdio["args"])
+        self.assertEqual(http, {"transport": "http", "url": "http://127.0.0.1:8765/mcp"})
+
+    @unittest.skipUnless(
+        importlib.util.find_spec("langchain_mcp_adapters"),
+        "MCP chat dependencies are missing",
+    )
+    def test_terminal_chat_loads_tools_from_private_stdio_server(self) -> None:
+        messages = parse_export(self.export_path)
+        with connect(self.db_path) as connection:
+            import_messages(connection, messages, "Family", self.export_path)
+        config = TerminalChatConfig(
+            db_path=str(self.db_path),
+            timezone="America/Sao_Paulo",
+            model="openai:gpt-5.6-terra",
+            chat_name="Family",
+            env_file=str(self.root / ".env"),
+        )
+
+        async def run() -> tuple[list[str], object]:
+            async with _open_tool_backend(config) as tools:
+                list_chats_tool = next(tool for tool in tools if tool.name == "list_chats")
+                return [tool.name for tool in tools], await list_chats_tool.ainvoke({})
+
+        tool_names, chats = asyncio.run(run())
+
+        self.assertIn("get_messages", tool_names)
+        self.assertEqual(json.loads(_content_to_text(chats))["chats"][0]["chat_name"], "Family")
 
     def test_terminal_chat_stream_helpers(self) -> None:
         mode, payload = _normalize_stream_event(("messages", "payload"))
