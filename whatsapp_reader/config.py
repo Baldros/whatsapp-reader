@@ -7,6 +7,9 @@ from .importer import DEFAULT_TIMEZONE
 
 
 DEFAULT_DB = "whatsapp.sqlite3"
+# Subfolder of this project inside WHATSAPP_READER_DB_ROOT, a directory that holds one
+# folder per database.
+DEFAULT_DB_DIR_NAME = "whatsapp-reader"
 DEFAULT_ENV_FILE = ".env"
 DEFAULT_AGENT_MODEL = "openai:gpt-5.6-terra"
 DEFAULT_CHAT_HISTORY_FILE = ".whatsapp-reader-history"
@@ -40,9 +43,25 @@ def load_env_file(path: str | Path | None = DEFAULT_ENV_FILE) -> None:
 
 
 def resolve_db_path(cli_value: str | Path | None = None) -> str:
+    """Resolve the SQLite path from the command line, the environment or the defaults.
+
+    An explicit path always wins, whether it comes from the command line or from
+    WHATSAPP_READER_DB. WHATSAPP_READER_DB_ROOT names a directory that holds one folder
+    per database, so this project keeps its own subfolder there. Without any of them the
+    database stays in the working directory, as it always has.
+    """
     if cli_value:
         return str(cli_value)
-    return os.environ.get("WHATSAPP_READER_DB", DEFAULT_DB)
+
+    env_value = os.environ.get("WHATSAPP_READER_DB")
+    if env_value:
+        return env_value
+
+    db_root = os.environ.get("WHATSAPP_READER_DB_ROOT")
+    if db_root:
+        return str(Path(db_root) / DEFAULT_DB_DIR_NAME / DEFAULT_DB)
+
+    return DEFAULT_DB
 
 
 def resolve_timezone(cli_value: str | None = None) -> str:

@@ -34,14 +34,19 @@ Confirme os caminhos e o executável:
 ```powershell
 $project = (Resolve-Path .).Path
 $python = Join-Path $project '.venv\Scripts\python.exe'
-$db = Join-Path $project 'whatsapp.sqlite3'
+# Raiz que guarda uma pasta por banco; use o caminho da sua raiz.
+# Para manter o banco dentro do projeto, aponte $dbRoot para $project.
+$dbRoot = 'D:\Bancos'
+$db = Join-Path $dbRoot 'whatsapp-reader\whatsapp.sqlite3'
 
 $project
 Test-Path -LiteralPath $python
 Test-Path -LiteralPath $db
 ```
 
-O banco pode não existir antes da primeira importação. Para confirmar um banco já populado:
+A pasta do banco é criada na primeira abertura, então `$dbRoot` pode ainda não existir.
+O banco também pode não existir antes da primeira importação. Para confirmar um banco já
+populado:
 
 ```powershell
 & $python -m whatsapp_reader query --db $db --limit 1
@@ -75,7 +80,8 @@ Execute todo o bloco abaixo no PowerShell aberto na raiz do projeto. Não é nec
 $taskName = 'WhatsApp Reader MCP'
 $project = (Resolve-Path .).Path
 $python = Join-Path $project '.venv\Scripts\python.exe'
-$db = Join-Path $project 'whatsapp.sqlite3'
+$dbRoot = 'D:\Bancos'
+$db = Join-Path $dbRoot 'whatsapp-reader\whatsapp.sqlite3'
 $envFile = Join-Path $project '.env'
 $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
 
@@ -190,7 +196,8 @@ Depois, ainda no PowerShell aberto como administrador e na raiz do projeto, regi
 $taskName = 'WhatsApp Reader MCP'
 $project = (Resolve-Path .).Path
 $python = Join-Path $project '.venv\Scripts\python.exe'
-$db = Join-Path $project 'whatsapp.sqlite3'
+$dbRoot = 'D:\Bancos'
+$db = Join-Path $dbRoot 'whatsapp-reader\whatsapp.sqlite3'
 $envFile = Join-Path $project '.env'
 
 if (-not (Test-Path -LiteralPath $python)) {
@@ -317,7 +324,8 @@ Use caminho absoluto em `--db` e confirme que ele aponta para o banco importado:
 ```powershell
 $project = (Resolve-Path .).Path
 $python = Join-Path $project '.venv\Scripts\python.exe'
-$db = Join-Path $project 'whatsapp.sqlite3'
+$dbRoot = 'D:\Bancos'
+$db = Join-Path $dbRoot 'whatsapp-reader\whatsapp.sqlite3'
 & $python -m whatsapp_reader query --db $db --limit 1
 ```
 

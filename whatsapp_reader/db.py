@@ -68,6 +68,7 @@ class ManagedConnection(sqlite3.Connection):
 
 
 def connect(db_path: str | Path) -> ManagedConnection:
+    _ensure_parent_directory(db_path)
     connection = sqlite3.connect(str(db_path), factory=ManagedConnection)
     connection.row_factory = sqlite3.Row
     try:
@@ -76,6 +77,18 @@ def connect(db_path: str | Path) -> ManagedConnection:
         connection.close()
         raise
     return connection
+
+
+def _ensure_parent_directory(db_path: str | Path) -> None:
+    """Create the folder that will hold the database.
+
+    A database root holding one folder per database starts empty, and SQLite refuses to
+    create a file in a directory that does not exist. In-memory databases name no file.
+    """
+    text = str(db_path)
+    if not text or text == ":memory:" or text.startswith("file:"):
+        return
+    Path(text).parent.mkdir(parents=True, exist_ok=True)
 
 
 def initialize_schema(connection: sqlite3.Connection) -> None:

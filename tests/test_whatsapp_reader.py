@@ -15,6 +15,8 @@ from unittest.mock import patch
 
 from whatsapp_reader.cli import format_messages_as_json, main as cli_main
 from whatsapp_reader.config import (
+    DEFAULT_DB,
+    DEFAULT_DB_DIR_NAME,
     load_env_file,
     resolve_chat_history_file,
     resolve_chat_memory_db,
@@ -423,6 +425,35 @@ class WhatsAppReaderTest(unittest.TestCase):
 
             self.assertEqual(resolve_db_path(), "from-env.sqlite3")
             self.assertEqual(resolve_timezone(), "America/Sao_Paulo")
+
+    def test_db_path_resolution_precedence(self) -> None:
+        db_root = self.root / "Bancos"
+        environment = {
+            "WHATSAPP_READER_DB": "from-env.sqlite3",
+            "WHATSAPP_READER_DB_ROOT": str(db_root),
+        }
+
+        with patch.dict(os.environ, environment, clear=True):
+            self.assertEqual(resolve_db_path("from-cli.sqlite3"), "from-cli.sqlite3")
+            self.assertEqual(resolve_db_path(), "from-env.sqlite3")
+
+        with patch.dict(os.environ, {"WHATSAPP_READER_DB_ROOT": str(db_root)}, clear=True):
+            self.assertEqual(
+                resolve_db_path(),
+                str(db_root / DEFAULT_DB_DIR_NAME / DEFAULT_DB),
+            )
+
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(resolve_db_path(), DEFAULT_DB)
+
+    def test_connect_creates_the_database_folder(self) -> None:
+        db_path = self.root / "Bancos" / DEFAULT_DB_DIR_NAME / DEFAULT_DB
+        self.assertFalse(db_path.parent.exists())
+
+        with connect(db_path) as connection:
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], SCHEMA_VERSION)
+
+        self.assertTrue(db_path.is_file())
 
     def test_chat_env_resolution(self) -> None:
         env_path = self.root / ".env"

@@ -53,6 +53,7 @@ O projeto lê, por padrão, um arquivo `.env` no diretório de trabalho. Valores
 OPENAI_API_KEY=
 WHATSAPP_READER_MODEL=openai:gpt-5.6-terra
 WHATSAPP_READER_DB=whatsapp.sqlite3
+WHATSAPP_READER_DB_ROOT=
 WHATSAPP_READER_TIMEZONE=America/Sao_Paulo
 WHATSAPP_READER_SESSION=default
 WHATSAPP_READER_MEMORY_DB=.whatsapp-reader-memory.sqlite3
@@ -66,12 +67,15 @@ WHATSAPP_READER_MCP_URL=
 | `OPENAI_API_KEY` | Credencial usada pelo agent/chat com modelos OpenAI |
 | `WHATSAPP_READER_MODEL` | Identificador do modelo LangChain |
 | `WHATSAPP_READER_DB` | Caminho do banco SQLite; padrão `whatsapp.sqlite3` |
+| `WHATSAPP_READER_DB_ROOT` | Diretório que guarda uma pasta por banco; o banco deste projeto fica em `<raiz>/whatsapp-reader/whatsapp.sqlite3` |
 | `WHATSAPP_READER_TIMEZONE` | Timezone usado na importação e nos filtros de data |
 | `WHATSAPP_READER_SESSION` | Identificador da memória do chat |
 | `WHATSAPP_READER_MEMORY_DB` | Banco SQLite da memória do chat |
 | `WHATSAPP_READER_HISTORY_FILE` | Histórico de entradas do terminal |
 | `WHATSAPP_READER_TOOLS_BACKEND` | Backend `mcp` (padrão) ou `direct` para diagnóstico |
 | `WHATSAPP_READER_MCP_URL` | URL de um MCP HTTP já em execução; vazia, o chat inicia um MCP próprio via `stdio` |
+
+O caminho do banco é resolvido nesta ordem: `--db`, depois `WHATSAPP_READER_DB`, depois `WHATSAPP_READER_DB_ROOT` e, por fim, `whatsapp.sqlite3` no diretório de trabalho. Use `WHATSAPP_READER_DB_ROOT` para manter os bancos fora do repositório, em um diretório com uma pasta por banco; a pasta do projeto é criada na primeira abertura, assim como qualquer pasta ausente no caminho informado em `--db`.
 
 As opções passadas na linha de comando, como `--db` e `--timezone`, têm precedência. Use caminhos absolutos ao configurar um client MCP ou serviço que possa iniciar fora do diretório do projeto.
 
